@@ -95,11 +95,13 @@ func TestBuiltBinaryDemoServesSeededDataWithoutTouchingConfiguredDataDir(t *test
 	port := reserveTCPPort(t)
 
 	cmd := exec.Command(binary, "demo")
+	authToken := "test-openmessage-token"
 	cmd.Env = append(
 		os.Environ(),
 		"OPENMESSAGES_DATA_DIR="+dataDir,
 		"OPENMESSAGES_HOST=127.0.0.1",
 		"OPENMESSAGES_PORT="+port,
+		"OPENMESSAGES_AUTH_TOKEN="+authToken,
 	)
 
 	out := &strings.Builder{}
@@ -112,11 +114,11 @@ func TestBuiltBinaryDemoServesSeededDataWithoutTouchingConfiguredDataDir(t *test
 	defer stopProcess(t, cmd)
 
 	baseURL := "http://127.0.0.1:" + port
-	if err := waitForHTTP(baseURL+"/api/status", 5*time.Second); err != nil {
+	if err := waitForHTTP(baseURL+"/api/status", authToken, 5*time.Second); err != nil {
 		t.Fatalf("demo server did not become ready: %v\n%s", err, out.String())
 	}
 
-	resp, err := http.Get(baseURL + "/api/status")
+	resp, err := authedGet(baseURL+"/api/status", authToken)
 	if err != nil {
 		t.Fatalf("GET /api/status: %v", err)
 	}
@@ -133,7 +135,7 @@ func TestBuiltBinaryDemoServesSeededDataWithoutTouchingConfiguredDataDir(t *test
 		t.Fatalf("status.connected = %v, want true", status["connected"])
 	}
 
-	resp, err = http.Get(baseURL + "/api/conversations?limit=50")
+	resp, err = authedGet(baseURL+"/api/conversations?limit=50", authToken)
 	if err != nil {
 		t.Fatalf("GET /api/conversations: %v", err)
 	}
@@ -183,11 +185,11 @@ func reserveTCPPort(t *testing.T) string {
 	return strconv.Itoa(addr.Port)
 }
 
-func waitForHTTP(url string, timeout time.Duration) error {
+func waitForHTTP(url, authToken string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := authedGet(url, authToken)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -200,6 +202,15 @@ func waitForHTTP(url string, timeout time.Duration) error {
 		time.Sleep(100 * time.Millisecond)
 	}
 	return lastErr
+}
+
+func authedGet(url, authToken string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-OpenMessage-Token", authToken)
+	return http.DefaultClient.Do(req)
 }
 
 func stopProcess(t *testing.T, cmd *exec.Cmd) {

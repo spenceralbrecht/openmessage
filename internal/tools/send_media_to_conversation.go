@@ -57,7 +57,7 @@ func sendMediaToConversationTool() mcp.Tool {
 		mcp.WithString("caption", mcp.Description("Optional caption for platforms that support media captions")),
 		mcp.WithString("mime_type", mcp.Description("Optional MIME type override, for example image/png")),
 		mcp.WithString("reply_to_id", mcp.Description("Optional message ID to reply to when the platform supports media replies")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(false),
 	)
 }
@@ -86,11 +86,15 @@ func sendMediaToConversationHandler(a *app.App) server.ToolHandlerFunc {
 			return errorResult(fmt.Sprintf("conversation %s not found", conversationID)), nil
 		}
 
-		data, err := os.ReadFile(filePath)
+		allowedPath, err := allowedAttachmentPath(filePath)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
+		data, err := os.ReadFile(allowedPath)
 		if err != nil {
 			return errorResult(fmt.Sprintf("read file: %v", err)), nil
 		}
-		filename := filepath.Base(filePath)
+		filename := filepath.Base(allowedPath)
 		if filename == "." || filename == string(filepath.Separator) || filename == "" {
 			return errorResult("file_path must point to a file"), nil
 		}
@@ -153,6 +157,44 @@ func sendMediaToConversationHandler(a *app.App) server.ToolHandlerFunc {
 			return errorResult(fmt.Sprintf("media sending is not supported for platform %s via OpenMessage MCP yet", conv.SourcePlatform)), nil
 		}
 	}
+}
+
+func allowedAttachmentPath(filePath string) (string, error) {
+	root := strings.TrimSpace(os.Getenv("OPENMESSAGES_ATTACHMENT_DIR"))
+	if root == "" {
+		return "", fmt.Errorf("media sends from MCP require OPENMESSAGES_ATTACHMENT_DIR to sandbox readable attachments")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve attachment dir: %w", err)
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("resolve attachment dir symlinks: %w", err)
+	}
+	absPath, err := filepath.Abs(filePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve file path: %w", err)
+	}
+	realPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve file path symlinks: %w", err)
+	}
+	rel, err := filepath.Rel(realRoot, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("file_path must be inside OPENMESSAGES_ATTACHMENT_DIR")
+	}
+	info, err := os.Stat(realPath)
+	if err != nil {
+		return "", fmt.Errorf("stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("file_path must point to a regular file")
+	}
+	if info.Size() > 25<<20 {
+		return "", fmt.Errorf("file exceeds maximum media upload size")
+	}
+	return realPath, nil
 }
 
 func detectMediaMimeType(filename string, data []byte, explicit string) string {

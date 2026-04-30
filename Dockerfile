@@ -5,7 +5,11 @@
 # running on a home server / NAS and connect from desktop clients.
 #
 # Build:   docker build -t openmessage .
-# Run:     docker run -p 7007:7007 -v openmessage-data:/data openmessage
+# Run:     docker run -p 127.0.0.1:7007:7007 \
+#            -e OPENMESSAGES_HOST=0.0.0.0 \
+#            -e OPENMESSAGES_UNSAFE_NETWORK=1 \
+#            -e OPENMESSAGES_AUTH_TOKEN="$(openssl rand -hex 32)" \
+#            -v openmessage-data:/data openmessage
 # Pair:    docker exec -it <container> openmessage pair
 # Connect: claude mcp add -s user --transport sse openmessage http://<host>:7007/mcp/sse
 
@@ -31,7 +35,6 @@ WORKDIR /home/openmessage
 COPY --from=build /out/openmessage /usr/local/bin/openmessage
 
 ENV OPENMESSAGES_DATA_DIR=/data \
-    OPENMESSAGES_HOST=0.0.0.0 \
     OPENMESSAGES_PORT=7007
 
 VOLUME ["/data"]

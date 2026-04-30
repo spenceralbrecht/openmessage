@@ -18,7 +18,7 @@ func sendGroupMessageTool() mcp.Tool {
 		mcp.WithDescription("Send a text message to a group conversation (MMS group). Creates the group if it doesn't exist."),
 		mcp.WithString("phone_numbers", mcp.Required(), mcp.Description(`JSON array of phone numbers with country code, e.g. ["+15551234567", "+15559876543"]`)),
 		mcp.WithString("message", mcp.Required(), mcp.Description("Message text to send")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(false),
 	)
 }

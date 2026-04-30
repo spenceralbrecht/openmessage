@@ -42,7 +42,7 @@ func reactToMessageTool() mcp.Tool {
 		mcp.WithString("message_id", mcp.Required(), mcp.Description("Target message ID")),
 		mcp.WithString("emoji", mcp.Required(), mcp.Description("Emoji reaction to apply")),
 		mcp.WithString("action", mcp.Description("Optional action: add, remove, or switch. Defaults to add.")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(false),
 	)
 }

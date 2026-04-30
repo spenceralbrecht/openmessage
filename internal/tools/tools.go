@@ -12,29 +12,48 @@ import (
 	"github.com/maxghenis/openmessage/internal/db"
 )
 
-func Register(s *server.MCPServer, a *app.App) {
+type Options struct {
+	AllowDrafts      bool
+	AllowWrites      bool
+	AllowImports     bool
+	AllowExternalLLM bool
+}
+
+func Register(s *server.MCPServer, a *app.App, optionSet ...Options) {
+	var opts Options
+	if len(optionSet) > 0 {
+		opts = optionSet[0]
+	}
 	s.AddTool(getMessagesTool(), getMessagesHandler(a))
 	s.AddTool(getConversationTool(), getConversationHandler(a))
 	s.AddTool(searchMessagesTool(), searchMessagesHandler(a))
-	s.AddTool(sendMessageTool(), sendMessageHandler(a))
-	s.AddTool(sendToConversationTool(), sendToConversationHandler(a))
-	s.AddTool(sendMediaToConversationTool(), sendMediaToConversationHandler(a))
-	s.AddTool(reactToMessageTool(), reactToMessageHandler(a))
 	s.AddTool(listConversationsTool(), listConversationsHandler(a))
 	s.AddTool(listContactsTool(), listContactsHandler(a))
 	s.AddTool(getStatusTool(), getStatusHandler(a))
-	s.AddTool(draftMessageTool(), draftMessageHandler(a))
-	s.AddTool(downloadMediaTool(), downloadMediaHandler(a))
-	s.AddTool(importMessagesTool(), importMessagesHandler(a))
 	s.AddTool(getPersonMessagesTool(), getPersonMessagesHandler(a))
 	s.AddTool(conversationStatsTool(), conversationStatsHandler(a))
-	s.AddTool(generateStoryTool(), generateStoryHandler(a))
 	s.AddTool(personStatsTool(), personStatsHandler(a))
-	s.AddTool(generatePersonStoryTool(), generatePersonStoryHandler(a))
-	s.AddTool(generateVizTool(), generateVizHandler(a))
 	s.AddTool(getPersonMessagesRangeTool(), getPersonMessagesRangeHandler(a))
-	s.AddTool(renderStoryTool(), renderStoryHandler(a))
-	s.AddTool(sendGroupMessageTool(), sendGroupMessageHandler(a))
+	if opts.AllowDrafts {
+		s.AddTool(draftMessageTool(), draftMessageHandler(a))
+	}
+	if opts.AllowWrites {
+		s.AddTool(sendMessageTool(), sendMessageHandler(a))
+		s.AddTool(sendToConversationTool(), sendToConversationHandler(a))
+		s.AddTool(sendMediaToConversationTool(), sendMediaToConversationHandler(a))
+		s.AddTool(reactToMessageTool(), reactToMessageHandler(a))
+		s.AddTool(sendGroupMessageTool(), sendGroupMessageHandler(a))
+	}
+	if opts.AllowImports {
+		s.AddTool(downloadMediaTool(), downloadMediaHandler(a))
+		s.AddTool(importMessagesTool(), importMessagesHandler(a))
+	}
+	if opts.AllowExternalLLM {
+		s.AddTool(generateStoryTool(), generateStoryHandler(a))
+		s.AddTool(generatePersonStoryTool(), generatePersonStoryHandler(a))
+		s.AddTool(generateVizTool(), generateVizHandler(a))
+		s.AddTool(renderStoryTool(), renderStoryHandler(a))
+	}
 }
 
 func strArg(args map[string]any, key string) string {

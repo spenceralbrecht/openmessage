@@ -28,6 +28,11 @@ import (
 //go:embed static/*
 var staticFS embed.FS
 
+const (
+	maxMediaUploadBytes = 25 << 20
+	multipartMemory     = 8 << 20
+)
+
 // APIHandler creates the HTTP handler with JSON API routes and static file serving.
 // The client may be nil (disconnected state).
 // mcpHandler is an optional http.Handler for the MCP SSE endpoint (mounted at /mcp/).
@@ -71,6 +76,8 @@ type APIOptions struct {
 	StartDeepBackfill     func() bool
 	BackfillStatus        func() any         // returns a JSON-serializable backfill progress snapshot
 	BackfillPhone         func(string) error // targeted backfill for a single phone number
+	AuthToken             string
+	AllowExternalLLM      bool
 }
 
 type SearchResult struct {
@@ -713,8 +720,8 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			httpError(w, "method not allowed", 405)
 			return
 		}
-		// Parse multipart form (max 10MB)
-		if err := r.ParseMultipartForm(10 << 20); err != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxMediaUploadBytes)
+		if err := r.ParseMultipartForm(multipartMemory); err != nil {
 			httpError(w, "invalid multipart form: "+err.Error(), 400)
 			return
 		}
@@ -737,6 +744,10 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		data, err := io.ReadAll(file)
 		if err != nil {
 			httpError(w, "read file: "+err.Error(), 500)
+			return
+		}
+		if int64(len(data)) > maxMediaUploadBytes {
+			httpError(w, "file exceeds maximum media upload size", 413)
 			return
 		}
 
@@ -894,8 +905,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			if mimeType == "" {
 				mimeType = msg.MimeType
 			}
-			w.Header().Set("Content-Type", mimeType)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			setMediaHeaders(w, mimeType)
 			w.Write(data)
 			return
 		}
@@ -912,8 +922,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			if mimeType == "" {
 				mimeType = msg.MimeType
 			}
-			w.Header().Set("Content-Type", mimeType)
-			w.Header().Set("Cache-Control", "public, max-age=86400")
+			setMediaHeaders(w, mimeType)
 			w.Write(data)
 			return
 		}
@@ -933,8 +942,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 			httpError(w, "download media: "+err.Error(), 502)
 			return
 		}
-		w.Header().Set("Content-Type", msg.MimeType)
-		w.Header().Set("Cache-Control", "public, max-age=86400")
+		setMediaHeaders(w, msg.MimeType)
 		w.Write(data)
 	})
 
@@ -1297,6 +1305,10 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 	})
 
 	mux.HandleFunc("/api/story/", func(w http.ResponseWriter, r *http.Request) {
+		if !opts.AllowExternalLLM {
+			httpError(w, "external LLM story generation is disabled by default; set OPENMESSAGES_ALLOW_EXTERNAL_LLM=1 to enable it", 403)
+			return
+		}
 		convID := strings.TrimPrefix(r.URL.Path, "/api/story/")
 		if convID == "" {
 			httpError(w, "conversation_id required", 400)
@@ -1642,16 +1654,16 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 
 	// Wrap the mux to intercept /mcp/ requests before the mux's catch-all
 	if mcpHandler != nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return SecureHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/mcp/") {
 				mcpHandler.ServeHTTP(w, r)
 				return
 			}
 			mux.ServeHTTP(w, r)
-		})
+		}), opts.AuthToken)
 	}
 
-	return mux
+	return SecureHandler(mux, opts.AuthToken)
 }
 
 func mergeSearchResults(store *db.Store, msgs []*db.Message, convos []*db.Conversation, limit int) []SearchResult {
@@ -1730,6 +1742,28 @@ func searchPreviewForMessage(msg *db.Message) string {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func setMediaHeaders(w http.ResponseWriter, mimeType string) {
+	if strings.TrimSpace(mimeType) == "" {
+		mimeType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", mimeType)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if isActiveMediaType(mimeType) {
+		w.Header().Set("Content-Disposition", "attachment")
+	}
+}
+
+func isActiveMediaType(mimeType string) bool {
+	mimeType = strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch mimeType {
+	case "image/svg+xml", "text/html", "application/xhtml+xml", "application/xml", "text/xml":
+		return true
+	default:
+		return false
+	}
 }
 
 func writeSSEEvent(w http.ResponseWriter, evt StreamEvent) error {

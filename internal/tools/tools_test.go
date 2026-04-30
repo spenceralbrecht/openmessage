@@ -636,7 +636,9 @@ func TestSendMediaToConversationSignal(t *testing.T) {
 		t.Fatalf("seed conversation: %v", err)
 	}
 
-	filePath := filepath.Join(t.TempDir(), "photo.jpg")
+	attachmentDir := t.TempDir()
+	t.Setenv("OPENMESSAGES_ATTACHMENT_DIR", attachmentDir)
+	filePath := filepath.Join(attachmentDir, "photo.jpg")
 	if err := os.WriteFile(filePath, []byte("jpeg-bytes"), 0644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", filePath, err)
 	}
@@ -713,7 +715,9 @@ func TestSendMediaToConversationUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("seed conversation: %v", err)
 	}
 
-	filePath := filepath.Join(t.TempDir(), "photo.jpg")
+	attachmentDir := t.TempDir()
+	t.Setenv("OPENMESSAGES_ATTACHMENT_DIR", attachmentDir)
+	filePath := filepath.Join(attachmentDir, "photo.jpg")
 	if err := os.WriteFile(filePath, []byte("jpeg-bytes"), 0644); err != nil {
 		t.Fatalf("WriteFile(%s): %v", filePath, err)
 	}

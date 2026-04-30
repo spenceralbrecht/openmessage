@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/rs/zerolog"
 
@@ -9,6 +10,10 @@ import (
 )
 
 func RunSend(logger zerolog.Logger, conversationID, message string) error {
+	if os.Getenv("OPENMESSAGES_ALLOW_DIRECT_SEND") != "1" {
+		return fmt.Errorf("direct send is disabled by default; use `openmessage draft` then `openmessage send-draft --confirm <draft_id>`, or set OPENMESSAGES_ALLOW_DIRECT_SEND=1 to opt into unsafe direct sends")
+	}
+
 	a, err := app.New(logger)
 	if err != nil {
 		return fmt.Errorf("init app: %w", err)

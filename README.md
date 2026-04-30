@@ -54,13 +54,29 @@ This starts both:
 - **Web UI** at [http://127.0.0.1:7007](http://127.0.0.1:7007)
 - **MCP SSE endpoint** at `http://127.0.0.1:7007/mcp/sse`
 
+The server now creates or reads an auth token on startup. Use the authenticated URL printed in the logs, or set `OPENMESSAGES_AUTH_TOKEN` yourself and pass it as `Authorization: Bearer <token>` or `X-OpenMessage-Token` for API/MCP clients.
+
 When `serve` is launched by an MCP client over pipes, it also serves MCP on stdio automatically.
 
-### 3a. Optional: link WhatsApp or Signal
+### 3a. CLI-first agent workflow
+
+Prefer the bounded JSON CLI for agent access to private messages:
+
+```bash
+./openmessage conversations --limit 20
+./openmessage messages <conversation_id> --limit 20
+./openmessage search "notion" --limit 10
+./openmessage draft <conversation_id> "Reply text to review"
+./openmessage send-draft <draft_id> --confirm <draft_id>
+```
+
+Direct `send` and `send-group` commands are disabled by default. Set `OPENMESSAGES_ALLOW_DIRECT_SEND=1` only when you intentionally want the old direct-send behavior.
+
+### 3b. Optional: link WhatsApp or Signal
 
 After `serve` is running, open the local UI and link WhatsApp or Signal from the Connections surface. OpenMessage keeps those bridges local and syncs them into the same inbox as Google Messages.
 
-### 3b. Safe demo mode for screenshots and recordings
+### 3c. Safe demo mode for screenshots and recordings
 
 ```bash
 ./openmessage demo
@@ -94,7 +110,12 @@ Add to `~/.mcp.json`:
 }
 ```
 
-Restart Claude Code. The MCP tools appear automatically.
+Restart Claude Code. By default, MCP exposes read-only tools only. Extra tool groups are opt-in:
+
+- `OPENMESSAGES_MCP_DRAFTS=1` exposes `draft_message`
+- `OPENMESSAGES_MCP_WRITES=1` exposes direct send, media send, group send, and reactions
+- `OPENMESSAGES_MCP_IMPORTS=1` exposes import and media-download tools
+- `OPENMESSAGES_MCP_EXTERNAL_LLM=1` exposes story/viz tools that may send message samples to external LLM providers
 
 ## Features
 
@@ -106,7 +127,7 @@ Restart Claude Code. The MCP tools appear automatically.
 - **Image/media display** — inline images, video, audio, and fullscreen viewer
 - **Desktop notifications** — native macOS notifications for fresh inbound messages
 - **Web UI + macOS app** — real-time conversation view at localhost:7007 and a native wrapper
-- **MCP tools** — conversation lookup, route-aware text/media/reaction sends, media download, import helpers, and story/viz tools
+- **MCP tools** — read-only conversation lookup by default, with write/import/external-LLM tools available only through explicit env opt-ins
 - **Local storage** — SQLite database, your data stays on your machine
 
 ## MCP tools
@@ -116,26 +137,21 @@ Restart Claude Code. The MCP tools appear automatically.
 | `get_messages` | Recent messages with filters (phone, date range, limit) |
 | `get_conversation` | Messages in a specific conversation |
 | `search_messages` | Full-text search across all messages |
-| `send_message` | Send a direct text by platform. Defaults to SMS/RCS and also supports direct WhatsApp/Signal recipients |
-| `send_to_conversation` | Send a text reply directly to an existing conversation ID |
-| `send_media_to_conversation` | Send a local file attachment to an existing conversation ID |
-| `react_to_message` | Add, remove, or switch a reaction on an existing message |
 | `list_conversations` | List recent conversations |
 | `list_contacts` | List/search contacts |
 | `get_status` | Google Messages, WhatsApp, and Signal connection status |
-| `download_media` | Download an attachment from a message to a local temp file |
-| `draft_message` | Save a draft for the local app to review/send later |
-| `import_messages` | Import Google Chat, iMessage, WhatsApp export, or Signal Desktop history |
+| `draft_message` | Save a draft for review/send later; requires `OPENMESSAGES_MCP_DRAFTS=1` |
+| `send_message`, `send_to_conversation`, `send_media_to_conversation`, `send_group_message`, `react_to_message` | Direct writes; require `OPENMESSAGES_MCP_WRITES=1` |
+| `download_media`, `import_messages` | Local file/import helpers; require `OPENMESSAGES_MCP_IMPORTS=1` |
+| Story/viz tools | External LLM and rendering tools; require `OPENMESSAGES_MCP_EXTERNAL_LLM=1` |
 
 ## MCP examples
 
 - List recent Signal threads: `list_conversations(source_platform="signal")`
 - Search WhatsApp for a keyword: `search_messages(query="airbnb")`
-- Send a direct Signal message: `send_message(platform="signal", recipient="+15551230000", message="On my way")`
-- Send a text into a route-aware thread: `send_to_conversation(conversation_id="whatsapp:15551234567@s.whatsapp.net", message="On my way")`
-- Send a photo from disk: `send_media_to_conversation(conversation_id="signal-group:abc123", file_path="/tmp/photo.jpg", caption="Here")`
-- React to a message: `react_to_message(conversation_id="signal-group:abc123", message_id="signal:...", emoji="🔥")`
-- Import Signal Desktop history: `import_messages(source="signal", path="$HOME/Library/Application Support/Signal", name="Your Name", address="+15551230000")`
+- Create a draft for review: `draft_message(conversation_id="whatsapp:15551234567@s.whatsapp.net", message="On my way")`
+- React to a message after enabling writes: `react_to_message(conversation_id="signal-group:abc123", message_id="signal:...", emoji="🔥")`
+- Import Signal Desktop history after enabling imports: `import_messages(source="signal", path="$HOME/Library/Application Support/Signal", name="Your Name", address="+15551230000")`
 
 ## Web UI
 
@@ -166,6 +182,15 @@ The macOS app target lives under `OpenMessage/`.
 | `OPENMESSAGES_LOG_LEVEL` | `info` | Log level (debug/info/warn/error/trace) |
 | `OPENMESSAGES_PORT` | `7007` | Web UI port |
 | `OPENMESSAGES_HOST` | `127.0.0.1` | Host/interface to bind the local web server to |
+| `OPENMESSAGES_AUTH_TOKEN` | random per launch | Required bearer/header/query token for `/api/*` and `/mcp/*` |
+| `OPENMESSAGES_UNSAFE_NETWORK` | unset | Must be `1` before binding `OPENMESSAGES_HOST` to a non-loopback interface |
+| `OPENMESSAGES_MCP_DRAFTS` | unset | Set to `1` to expose the MCP draft tool |
+| `OPENMESSAGES_MCP_WRITES` | unset | Set to `1` to expose MCP send/media/reaction tools |
+| `OPENMESSAGES_MCP_IMPORTS` | unset | Set to `1` to expose MCP import/media-download tools |
+| `OPENMESSAGES_MCP_EXTERNAL_LLM` | unset | Set to `1` to expose MCP story/viz tools |
+| `OPENMESSAGES_ALLOW_EXTERNAL_LLM` | unset | Set to `1` to enable the web `/api/story/*` external LLM endpoint |
+| `OPENMESSAGES_ATTACHMENT_DIR` | unset | Required sandbox directory for MCP media-send file reads |
+| `OPENMESSAGES_ALLOW_DIRECT_SEND` | unset | Set to `1` to restore unsafe direct CLI send commands |
 | `OPENMESSAGES_MY_NAME` | system user name | Display name for outgoing imported iMessage/WhatsApp messages |
 | `OPENMESSAGES_STARTUP_BACKFILL` | `auto` | Startup history sync mode: `auto`, `shallow`, `deep`, or `off` |
 | `OPENMESSAGES_MACOS_NOTIFICATIONS` | interactive macOS `serve` sessions only | Enable/disable native macOS notifications for fresh inbound live messages (`1`/`0`). Click-through opens the matching thread when `terminal-notifier` is available. |
@@ -202,4 +227,4 @@ Before publishing a build or website update, run through [the release checklist]
 
 ## License
 
-MIT
+Unlicense. See `LICENSE`.

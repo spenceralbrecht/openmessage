@@ -88,17 +88,38 @@ func downloadMediaHandler(a *app.App) server.ToolHandlerFunc {
 		// Determine file extension from mime type
 		ext := extensionForMime(mimeType)
 
-		// Save to a temp file
-		tmpDir := os.TempDir()
-		filename := fmt.Sprintf("openmessage-%s%s", msgID, ext)
-		filePath := filepath.Join(tmpDir, filename)
-
-		if err := os.WriteFile(filePath, data, 0644); err != nil {
+		tmpDir, err := secureMediaTempDir()
+		if err != nil {
+			return errorResult(fmt.Sprintf("create temp dir: %v", err)), nil
+		}
+		f, err := os.CreateTemp(tmpDir, "openmessage-*"+ext)
+		if err != nil {
+			return errorResult(fmt.Sprintf("create temp file: %v", err)), nil
+		}
+		filePath := f.Name()
+		if _, err := f.Write(data); err != nil {
+			_ = f.Close()
+			_ = os.Remove(filePath)
 			return errorResult(fmt.Sprintf("write file: %v", err)), nil
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(filePath)
+			return errorResult(fmt.Sprintf("close file: %v", err)), nil
 		}
 
 		return textResult(fmt.Sprintf("Downloaded %s (%d bytes) to:\n%s", mimeType, len(data), filePath)), nil
 	}
+}
+
+func secureMediaTempDir() (string, error) {
+	dir := filepath.Join(os.TempDir(), "openmessage-media")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 func extensionForMime(mime string) string {

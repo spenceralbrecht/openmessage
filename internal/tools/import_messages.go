@@ -34,7 +34,7 @@ func importMessagesTool() mcp.Tool {
 		mcp.WithString("email", mcp.Description("Your email for gchat imports (marks your messages as is_from_me)")),
 		mcp.WithString("name", mcp.Description("Your display name for whatsapp, imessage, or signal imports")),
 		mcp.WithString("address", mcp.Description("Your Signal account identifier (usually phone number with country code) for signal imports")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 	)
 }
 

@@ -45,7 +45,7 @@ func sendMessageTool() mcp.Tool {
 		mcp.WithString("recipient", mcp.Description("Recipient identifier. Use a phone number for SMS/RCS or Signal, and a phone number or WhatsApp JID for WhatsApp.")),
 		mcp.WithString("platform", mcp.Description("Target platform: sms, rcs, whatsapp, or signal. Defaults to sms.")),
 		mcp.WithString("message", mcp.Required(), mcp.Description("Message text to send")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(false),
 	)
 }

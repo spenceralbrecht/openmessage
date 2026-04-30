@@ -25,7 +25,7 @@ func sendToConversationTool() mcp.Tool {
 		mcp.WithDescription("Send a text message to an existing conversation by conversation ID across supported platforms"),
 		mcp.WithString("conversation_id", mcp.Required(), mcp.Description("Existing conversation ID from list_conversations or get_conversation")),
 		mcp.WithString("message", mcp.Required(), mcp.Description("Message text to send")),
-		mcp.WithDestructiveHintAnnotation(false),
+		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithIdempotentHintAnnotation(false),
 	)
 }

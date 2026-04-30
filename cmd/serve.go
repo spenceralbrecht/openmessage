@@ -70,8 +70,15 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	if host == "" {
 		host = "127.0.0.1"
 	}
+	if !safeListenHost(host) && os.Getenv("OPENMESSAGES_UNSAFE_NETWORK") != "1" {
+		return fmt.Errorf("refusing to bind to non-loopback host %q without OPENMESSAGES_UNSAFE_NETWORK=1", host)
+	}
 	listenAddr := net.JoinHostPort(host, port)
 	baseURL := "http://" + net.JoinHostPort(publicHost(host), port)
+	authToken, err := resolveAuthToken()
+	if err != nil {
+		return fmt.Errorf("create auth token: %w", err)
+	}
 	isDemo := app.DemoMode()
 
 	events := web.NewEventBroker()
@@ -326,7 +333,12 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		buildVersion,
 		mcpserver.WithToolCapabilities(true),
 	)
-	tools.Register(mcpSrv, a)
+	tools.Register(mcpSrv, a, tools.Options{
+		AllowDrafts:      envEnabled("OPENMESSAGES_MCP_DRAFTS"),
+		AllowWrites:      envEnabled("OPENMESSAGES_MCP_WRITES"),
+		AllowImports:     envEnabled("OPENMESSAGES_MCP_IMPORTS"),
+		AllowExternalLLM: envEnabled("OPENMESSAGES_MCP_EXTERNAL_LLM"),
+	})
 
 	// Create SSE transport for MCP, mounted at /mcp/
 	sseSrv := mcpserver.NewSSEServer(mcpSrv,
@@ -375,6 +387,8 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		StartDeepBackfill:     a.StartDeepBackfill,
 		BackfillStatus:        func() any { return a.GetBackfillProgress() },
 		BackfillPhone:         a.BackfillConversationByPhone,
+		AuthToken:             authToken,
+		AllowExternalLLM:      envEnabled("OPENMESSAGES_ALLOW_EXTERNAL_LLM"),
 	})
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
@@ -382,8 +396,16 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	}
 	go func() {
 		logger.Info().Str("addr", listenAddr).Msg("Web UI available at " + baseURL)
+		logger.Info().Str("url", baseURL+"/?"+web.AuthTokenQueryParam+"="+authToken).Msg("Authenticated Web UI URL")
 		logger.Info().Str("addr", listenAddr).Msg("MCP SSE available at " + baseURL + "/mcp/sse")
-		if err := http.Serve(ln, httpHandler); err != nil {
+		srv := &http.Server{
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			MaxHeaderBytes:    16 << 10,
+		}
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			logger.Error().Err(err).Msg("HTTP server error")
 		}
 	}()
@@ -491,6 +513,32 @@ func startupBackfillMode() string {
 	default:
 		return "auto"
 	}
+}
+
+func resolveAuthToken() (string, error) {
+	if token := strings.TrimSpace(os.Getenv("OPENMESSAGES_AUTH_TOKEN")); token != "" {
+		return token, nil
+	}
+	return web.NewAuthToken()
+}
+
+func envEnabled(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeListenHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost":
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func macOSNotificationsEnabled(interactive bool) bool {
