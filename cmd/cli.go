@@ -192,6 +192,42 @@ func RunDraft(logger zerolog.Logger, args ...string) error {
 	})
 }
 
+func RunDrafts(logger zerolog.Logger, args ...string) error {
+	fs := flag.NewFlagSet("drafts", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: openmessage drafts <conversation_id>")
+	}
+	conversationID := fs.Arg(0)
+
+	a, err := app.New(logger)
+	if err != nil {
+		return fmt.Errorf("init app: %w", err)
+	}
+	defer a.Close()
+
+	if conv, err := a.Store.GetConversation(conversationID); err != nil {
+		return fmt.Errorf("get conversation: %w", err)
+	} else if conv == nil {
+		return fmt.Errorf("conversation %s not found", conversationID)
+	}
+	drafts, err := a.Store.ListDrafts(conversationID)
+	if err != nil {
+		return fmt.Errorf("list drafts: %w", err)
+	}
+	out := make([]draftOutput, 0, len(drafts))
+	for _, draft := range drafts {
+		out = append(out, mapDraft(draft))
+	}
+	return writeJSON(os.Stdout, map[string]any{
+		"conversation_id": conversationID,
+		"drafts":          out,
+	})
+}
+
 func RunSendDraft(logger zerolog.Logger, args ...string) error {
 	fs := flag.NewFlagSet("send-draft", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
