@@ -327,6 +327,28 @@ func (b *Bridge) Connect() error {
 	return nil
 }
 
+func (b *Bridge) PairPhone(ctx context.Context, phone, clientDisplayName string) (string, error) {
+	b.mu.RLock()
+	cli := b.client
+	b.mu.RUnlock()
+	if cli == nil || !clientIsConnected(cli) {
+		return "", errors.New("whatsapp pairing websocket is not connected")
+	}
+	clientDisplayName = strings.TrimSpace(clientDisplayName)
+	if clientDisplayName == "" {
+		clientDisplayName = "Chrome (macOS)"
+	}
+	code, err := cli.PairPhone(ctx, phone, false, whatsmeow.PairClientChrome, clientDisplayName)
+	if err != nil {
+		b.mu.Lock()
+		b.lastError = err.Error()
+		b.mu.Unlock()
+		b.emitStatusChange()
+		return "", err
+	}
+	return code, nil
+}
+
 func (b *Bridge) runConnect(cli *whatsmeow.Client) {
 	if err := connectClient(cli); err != nil {
 		b.logger.Warn().Err(err).Msg("WhatsApp connect failed")

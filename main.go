@@ -32,7 +32,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "  draft <conversation_id> <msg>             - Create a local draft as JSON")
 		fmt.Fprintln(os.Stderr, "  drafts <conversation_id>                  - List local drafts for a conversation")
 		fmt.Fprintln(os.Stderr, "  send-draft <draft_id> --confirm <id>      - Send a reviewed draft")
-		fmt.Fprintln(os.Stderr, "  whatsapp <status|connect|qr|unpair>       - Manage WhatsApp linked-device setup")
+		fmt.Fprintln(os.Stderr, "  whatsapp <status|connect|code|qr|unpair>  - Manage WhatsApp linked-device setup")
 		fmt.Fprintln(os.Stderr, "  send <conversation_id> <msg>              - Unsafe direct send, requires OPENMESSAGES_ALLOW_DIRECT_SEND=1")
 		fmt.Fprintln(os.Stderr, "  send-group <phone1,phone2,...> <msg>       - Unsafe direct group send, requires OPENMESSAGES_ALLOW_DIRECT_SEND=1")
 		fmt.Fprintln(os.Stderr, "  import gchat <groups-dir> [--email you@]  - Import Google Chat Takeout")

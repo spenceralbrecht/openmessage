@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/mdp/qrterminal/v3"
@@ -16,19 +18,21 @@ import (
 
 func RunWhatsApp(logger zerolog.Logger, args ...string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: openmessage whatsapp <status|connect|qr|unpair>")
+		return fmt.Errorf("usage: openmessage whatsapp <status|connect|code|qr|unpair>")
 	}
 	switch args[0] {
 	case "status":
 		return runWhatsAppStatus(logger, args[1:]...)
 	case "connect", "pair":
 		return runWhatsAppConnect(logger, args[1:]...)
+	case "code", "pair-code":
+		return runWhatsAppCode(logger, args[1:]...)
 	case "qr":
 		return runWhatsAppQR(logger, args[1:]...)
 	case "unpair":
 		return runWhatsAppUnpair(logger, args[1:]...)
 	default:
-		return fmt.Errorf("unknown whatsapp command %q; usage: openmessage whatsapp <status|connect|qr|unpair>", args[0])
+		return fmt.Errorf("unknown whatsapp command %q; usage: openmessage whatsapp <status|connect|code|qr|unpair>", args[0])
 	}
 }
 
@@ -131,6 +135,57 @@ func runWhatsAppQR(logger zerolog.Logger, args ...string) error {
 	})
 }
 
+func runWhatsAppCode(logger zerolog.Logger, args ...string) error {
+	fs := flag.NewFlagSet("whatsapp code", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	phone := fs.String("phone", "", "WhatsApp account phone number in international format")
+	wait := fs.Duration("wait", 180*time.Second, "maximum time to wait for pairing after the code is generated")
+	startTimeout := fs.Duration("start-timeout", 20*time.Second, "maximum time to wait for WhatsApp bridge startup")
+	codeTimeout := fs.Duration("code-timeout", 15*time.Second, "maximum time to wait while requesting the pairing code")
+	clientDisplayName := fs.String("display-name", "Chrome (macOS)", "client display name, formatted as Browser (OS)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cleanPhone := strings.TrimSpace(*phone)
+	if cleanPhone == "" {
+		return fmt.Errorf("usage: openmessage whatsapp code --phone <international_phone_number>")
+	}
+
+	a, err := app.New(logger)
+	if err != nil {
+		return fmt.Errorf("init app: %w", err)
+	}
+	defer a.Close()
+
+	if err := startWhatsAppConnectWithTimeout(a, *startTimeout); err != nil {
+		return fmt.Errorf("start whatsapp connect: %w", err)
+	}
+	if _, err := waitForWhatsAppQR(a, *startTimeout); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *codeTimeout)
+	defer cancel()
+	code, err := a.PairWhatsAppPhone(ctx, cleanPhone, *clientDisplayName)
+	if err != nil {
+		return fmt.Errorf("request whatsapp pairing code: %w", err)
+	}
+
+	fmt.Println("WhatsApp pairing code:", code)
+	fmt.Println("On your phone: WhatsApp > Settings > Linked Devices > Link a Device > Link with phone number instead.")
+
+	status, err := waitForWhatsAppConnect(a, *wait, false, "")
+	if err != nil {
+		if status.LastError != "" {
+			return fmt.Errorf("%w: %s", err, status.LastError)
+		}
+		return err
+	}
+	return writeJSON(os.Stdout, map[string]any{
+		"whatsapp": status,
+	})
+}
+
 func runWhatsAppUnpair(logger zerolog.Logger, args ...string) error {
 	fs := flag.NewFlagSet("whatsapp unpair", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -154,6 +209,23 @@ func runWhatsAppUnpair(logger zerolog.Logger, args ...string) error {
 	return writeJSON(os.Stdout, map[string]any{
 		"unpaired": true,
 	})
+}
+
+func waitForWhatsAppQR(a *app.App, wait time.Duration) (whatsapplive.StatusSnapshot, error) {
+	deadline := time.Now().Add(wait)
+	var lastStatus whatsapplive.StatusSnapshot
+	for time.Now().Before(deadline) {
+		status := a.WhatsAppStatus()
+		lastStatus = status
+		if status.QRAvailable || status.Connected {
+			return status, nil
+		}
+		if status.LastError != "" && !status.Connecting && !status.Pairing {
+			return status, fmt.Errorf("whatsapp pairing failed before code request: %s", status.LastError)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return lastStatus, fmt.Errorf("whatsapp QR channel was not ready after %s", wait)
 }
 
 func waitForWhatsApp(a *app.App, wait time.Duration) whatsapplive.StatusSnapshot {

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/maxghenis/openmessage/internal/db"
@@ -88,6 +89,14 @@ func (a *App) WhatsAppQRCode() (whatsapplive.QRSnapshot, error) {
 		return whatsapplive.QRSnapshot{}, fmt.Errorf("init WhatsApp bridge: %w", err)
 	}
 	return bridge.QRCode()
+}
+
+func (a *App) PairWhatsAppPhone(ctx context.Context, phone, clientDisplayName string) (string, error) {
+	bridge, err := a.ensureWhatsApp()
+	if err != nil {
+		return "", fmt.Errorf("init WhatsApp bridge: %w", err)
+	}
+	return bridge.PairPhone(ctx, phone, clientDisplayName)
 }
 
 func (a *App) UsesWhatsAppLiveBridge() bool {
