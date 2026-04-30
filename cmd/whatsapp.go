@@ -8,6 +8,7 @@ import (
 
 	"github.com/mdp/qrterminal/v3"
 	"github.com/rs/zerolog"
+	qr "rsc.io/qr"
 
 	"github.com/maxghenis/openmessage/internal/app"
 	"github.com/maxghenis/openmessage/internal/whatsapplive"
@@ -63,6 +64,7 @@ func runWhatsAppConnect(logger zerolog.Logger, args ...string) error {
 	fs.SetOutput(os.Stderr)
 	wait := fs.Duration("wait", 90*time.Second, "maximum time to wait for pairing or connection")
 	startTimeout := fs.Duration("start-timeout", 20*time.Second, "maximum time to wait for WhatsApp bridge startup")
+	qrPNGPath := fs.String("qr-png", "", "optional path to write the latest WhatsApp QR code as a PNG")
 	jsonOnly := fs.Bool("json", false, "print status snapshots as JSON only")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -78,7 +80,7 @@ func runWhatsAppConnect(logger zerolog.Logger, args ...string) error {
 		return fmt.Errorf("start whatsapp connect: %w", err)
 	}
 
-	status, err := waitForWhatsAppConnect(a, *wait, !*jsonOnly)
+	status, err := waitForWhatsAppConnect(a, *wait, !*jsonOnly, *qrPNGPath)
 	if err != nil {
 		if status.LastError != "" {
 			return fmt.Errorf("%w: %s", err, status.LastError)
@@ -167,7 +169,7 @@ func waitForWhatsApp(a *app.App, wait time.Duration) whatsapplive.StatusSnapshot
 	return a.WhatsAppStatus()
 }
 
-func waitForWhatsAppConnect(a *app.App, wait time.Duration, showQR bool) (whatsapplive.StatusSnapshot, error) {
+func waitForWhatsAppConnect(a *app.App, wait time.Duration, showQR bool, qrPNGPath string) (whatsapplive.StatusSnapshot, error) {
 	deadline := time.Now().Add(wait)
 	var displayedQRUpdatedAt int64
 	var lastStatus whatsapplive.StatusSnapshot
@@ -184,6 +186,13 @@ func waitForWhatsAppConnect(a *app.App, wait time.Duration, showQR bool) (whatsa
 		if showQR && status.QRAvailable && status.QRUpdatedAt != displayedQRUpdatedAt {
 			if snap, err := a.WhatsAppQRCode(); err == nil {
 				displayWhatsAppQR(snap)
+				if qrPNGPath != "" {
+					if err := writeWhatsAppQRPNG(snap, qrPNGPath); err != nil {
+						fmt.Fprintln(os.Stderr, "Failed to write QR PNG:", err)
+					} else {
+						fmt.Println("PNG:", qrPNGPath)
+					}
+				}
 				displayedQRUpdatedAt = status.QRUpdatedAt
 			}
 		}
@@ -201,4 +210,15 @@ func displayWhatsAppQR(snap whatsapplive.QRSnapshot) {
 	if snap.ExpiresAt > 0 {
 		fmt.Println("Expires at:", time.UnixMilli(snap.ExpiresAt).Format(time.RFC3339))
 	}
+}
+
+func writeWhatsAppQRPNG(snap whatsapplive.QRSnapshot, path string) error {
+	code, err := qr.Encode(snap.Code, qr.M)
+	if err != nil {
+		return fmt.Errorf("encode WhatsApp QR: %w", err)
+	}
+	if err := os.WriteFile(path, code.PNG(), 0o600); err != nil {
+		return fmt.Errorf("write WhatsApp QR PNG: %w", err)
+	}
+	return nil
 }
