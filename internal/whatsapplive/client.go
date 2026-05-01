@@ -21,7 +21,9 @@ import (
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
+	waCompanionReg "go.mau.fi/whatsmeow/proto/waCompanionReg"
 	waE2E "go.mau.fi/whatsmeow/proto/waE2E"
+	waWa6 "go.mau.fi/whatsmeow/proto/waWa6"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	watypes "go.mau.fi/whatsmeow/types"
@@ -41,6 +43,8 @@ const maxUnavailablePlaceholderRepairs = 25
 const recentlyLeftGroupTTL = 6 * time.Hour
 
 var ErrProfilePhotoNotFound = errors.New("whatsapp profile photo not found")
+
+var configureWhatsAppClientIdentityOnce sync.Once
 
 var sendTextMessage = func(cli *whatsmeow.Client, ctx context.Context, to watypes.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	return cli.SendMessage(ctx, to, message, extra...)
@@ -200,6 +204,7 @@ func (b *Bridge) initClientLocked() error {
 	if b.client != nil {
 		return nil
 	}
+	configureWhatsAppClientIdentity()
 	container, err := sqlstore.New(context.Background(), "sqlite", sessionStoreDSN(b.sessionPath), waLog.Noop)
 	if err != nil {
 		return fmt.Errorf("open WhatsApp session store: %w", err)
@@ -238,6 +243,20 @@ func (b *Bridge) resetClientLocked() error {
 		b.container = nil
 	}
 	return b.initClientLocked()
+}
+
+func configureWhatsAppClientIdentity() {
+	configureWhatsAppClientIdentityOnce.Do(func() {
+		wastore.SetOSInfo("macOS", [3]uint32{15, 0, 0})
+		wastore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+		wastore.BaseClientPayload.UserAgent.Device = proto.String("Desktop")
+		wastore.BaseClientPayload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
+		if wastore.BaseClientPayload.WebInfo != nil {
+			wastore.BaseClientPayload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()
+			wastore.BaseClientPayload.WebInfo.Browser = proto.String("Chrome")
+			wastore.BaseClientPayload.WebInfo.BrowserVersion = proto.String("124.0.0.0")
+		}
+	})
 }
 
 func (b *Bridge) recoverPersistedSessionLocked() error {
