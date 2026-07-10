@@ -83,6 +83,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	readOnlyWeb := !envEnabled("OPENMESSAGES_ALLOW_WEB_WRITES")
 	whatsAppLiveEnabled := os.Getenv("OPENMESSAGES_WHATSAPP") != "0"
 	signalLiveEnabled := os.Getenv("OPENMESSAGES_SIGNAL") != "0"
+	iMessageImportEnabled := os.Getenv("OPENMESSAGES_IMESSAGE") != "0"
 
 	events := web.NewEventBroker()
 	isConnected := func() bool {
@@ -259,9 +260,11 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 				})
 			}
 		}
-		syncPlatform("imessage", "iMessage sync complete", func(store *db.Store) (*importer.ImportResult, error) {
-			return (&importer.IMessage{MyName: identityName}).ImportFromDB(store)
-		})
+		if iMessageImportEnabled {
+			syncPlatform("imessage", "iMessage sync complete", func(store *db.Store) (*importer.ImportResult, error) {
+				return (&importer.IMessage{MyName: identityName}).ImportFromDB(store)
+			})
+		}
 		if changed {
 			events.PublishConversations()
 			events.PublishMessages("")

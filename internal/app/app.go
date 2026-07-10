@@ -247,7 +247,7 @@ func New(logger zerolog.Logger) (*App, error) {
 				Msg("Repaired legacy Google Messages outgoing attribution rows")
 		}
 	}
-	if !Sandboxed() {
+	if !Sandboxed() && os.Getenv("OPENMESSAGES_WHATSAPP") != "0" {
 		if mediaRepair, err := (&importer.WhatsAppNative{}).RepairLegacyMediaPlaceholders(store); err != nil {
 			logger.Warn().Err(err).Msg("Failed to repair legacy WhatsApp media placeholders")
 		} else if mediaRepair.MessagesRepaired > 0 {
