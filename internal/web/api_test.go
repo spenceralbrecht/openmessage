@@ -101,6 +101,51 @@ func readSSEEvent(t *testing.T, reader *bufio.Reader) sseEvent {
 	}
 }
 
+func TestReadOnlyAPIRejectsMutationsAndReportsMode(t *testing.T) {
+	ts := newTestServerWithOptions(t, APIOptions{ReadOnly: true})
+
+	resp, err := http.Post(ts.server.URL+"/api/unpair", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	}
+
+	statusResp, err := http.Get(ts.server.URL + "/api/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusResp.Body.Close()
+	var payload map[string]any
+	if err := json.NewDecoder(statusResp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if readOnly, ok := payload["read_only"].(bool); !ok || !readOnly {
+		t.Fatalf("read_only = %#v, want true", payload["read_only"])
+	}
+}
+
+func TestReadOnlyAPIDoesNotBlockMCPTransportPOST(t *testing.T) {
+	store, err := db.New(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mcp := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := APIHandlerWithOptions(store, nil, zerolog.Nop(), mcp, APIOptions{ReadOnly: true})
+	req := httptest.NewRequest(http.MethodPost, "/mcp/messages", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("MCP POST status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+}
+
 func TestListConversations(t *testing.T) {
 	ts := newTestServer(t)
 

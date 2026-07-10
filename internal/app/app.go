@@ -45,6 +45,20 @@ type BackfillProgress struct {
 	ErrorDetails       []string      `json:"error_details,omitempty"`
 }
 
+// BackfillProgressSnapshot is the mutex-free, JSON-safe view exposed to
+// callers. Keeping synchronization primitives out of returned values avoids
+// copying a live mutex and makes the ownership boundary explicit.
+type BackfillProgressSnapshot struct {
+	Running            bool          `json:"running"`
+	Phase              BackfillPhase `json:"phase"`
+	FoldersScanned     int           `json:"folders_scanned"`
+	ConversationsFound int           `json:"conversations_found"`
+	MessagesFound      int           `json:"messages_found"`
+	ContactsChecked    int           `json:"contacts_checked"`
+	Errors             int           `json:"errors"`
+	ErrorDetails       []string      `json:"error_details,omitempty"`
+}
+
 // reset clears all fields for a fresh backfill run.
 func (p *BackfillProgress) reset() {
 	p.mu.Lock()
@@ -94,18 +108,27 @@ func (p *BackfillProgress) add(conversations, messages, contacts, folders int) {
 	p.FoldersScanned += folders
 }
 
-func (p *BackfillProgress) snapshot() BackfillProgress {
+func (p *BackfillProgress) snapshot() BackfillProgressSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	cp := *p
-	if len(p.ErrorDetails) > 0 {
-		cp.ErrorDetails = append([]string(nil), p.ErrorDetails...)
+	snapshot := BackfillProgressSnapshot{
+		Running:            p.Running,
+		Phase:              p.Phase,
+		FoldersScanned:     p.FoldersScanned,
+		ConversationsFound: p.ConversationsFound,
+		MessagesFound:      p.MessagesFound,
+		ContactsChecked:    p.ContactsChecked,
+		Errors:             p.Errors,
 	}
-	return cp
+	if len(p.ErrorDetails) > 0 {
+		snapshot.ErrorDetails = append([]string(nil), p.ErrorDetails...)
+	}
+	return snapshot
 }
 
 type App struct {
 	clientMu               sync.RWMutex
+	googleConnectMu        sync.Mutex
 	Client                 *client.Client
 	Store                  *db.Store
 	EventHandler           *client.EventHandler
@@ -115,6 +138,7 @@ type App struct {
 	WhatsAppSessionPath    string
 	SignalConfigPath       string
 	Connected              atomic.Bool
+	closing                atomic.Bool
 	OnConversationsChange  func()
 	OnIncomingMessage      func(*db.Message)
 	OnMessagesChange       func(string)
@@ -179,11 +203,11 @@ func New(logger zerolog.Logger) (*App, error) {
 		dataDir = tmpDir
 		tempDataDir = tmpDir
 	}
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
+	if err := secureMessagingDataDir(dataDir); err != nil {
 		if tempDataDir != "" {
 			_ = os.RemoveAll(tempDataDir)
 		}
-		return nil, fmt.Errorf("create data dir: %w", err)
+		return nil, fmt.Errorf("secure data dir: %w", err)
 	}
 
 	dbPath := filepath.Join(dataDir, "messages.db")
@@ -223,7 +247,7 @@ func New(logger zerolog.Logger) (*App, error) {
 				Msg("Repaired legacy Google Messages outgoing attribution rows")
 		}
 	}
-	if !Sandboxed() {
+	if !Sandboxed() && os.Getenv("OPENMESSAGES_WHATSAPP") != "0" {
 		if mediaRepair, err := (&importer.WhatsAppNative{}).RepairLegacyMediaPlaceholders(store); err != nil {
 			logger.Warn().Err(err).Msg("Failed to repair legacy WhatsApp media placeholders")
 		} else if mediaRepair.MessagesRepaired > 0 {
@@ -265,6 +289,62 @@ func New(logger zerolog.Logger) (*App, error) {
 	return app, nil
 }
 
+// secureMessagingDataDir enforces owner-only permissions before SQLite opens
+// credential-bearing stores. Pre-creating the databases at 0600 also ensures
+// SQLite sidecars inherit a private mode even when the caller has a broad umask.
+func secureMessagingDataDir(dataDir string) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	info, err := os.Lstat(dataDir)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("data path must be a regular directory")
+	}
+	if err := os.Chmod(dataDir, 0o700); err != nil {
+		return err
+	}
+
+	for _, name := range []string{"messages.db", "whatsapp-session.db"} {
+		if err := ensurePrivateRegularFile(filepath.Join(dataDir, name), true); err != nil {
+			return fmt.Errorf("secure private store %s: %w", name, err)
+		}
+	}
+
+	for _, name := range []string{
+		"messages.db-wal",
+		"messages.db-shm",
+		"whatsapp-session.db-wal",
+		"whatsapp-session.db-shm",
+		"session.json",
+	} {
+		if err := ensurePrivateRegularFile(filepath.Join(dataDir, name), false); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("secure existing messaging artifact %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func ensurePrivateRegularFile(path string, create bool) error {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) && create {
+		file, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if createErr != nil {
+			return createErr
+		}
+		return file.Close()
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("path must be a regular, non-symlink file")
+	}
+	return os.Chmod(path, 0o600)
+}
+
 func LocalIdentityName() string {
 	if name := os.Getenv("OPENMESSAGES_MY_NAME"); name != "" {
 		return name
@@ -298,6 +378,12 @@ func (a *App) setClient(cli *client.Client) {
 }
 
 func (a *App) LoadAndConnect() error {
+	a.googleConnectMu.Lock()
+	defer a.googleConnectMu.Unlock()
+	if a.closing.Load() {
+		return fmt.Errorf("app is closing")
+	}
+
 	sessionData, err := client.LoadSession(a.SessionPath)
 	if err != nil {
 		a.setGoogleLastError(err.Error())
@@ -346,6 +432,10 @@ func (a *App) LoadAndConnect() error {
 	if err := cli.GM.Connect(); err != nil {
 		a.setGoogleLastError(err.Error())
 		return fmt.Errorf("connect: %w", err)
+	}
+	if a.closing.Load() {
+		cli.GM.Disconnect()
+		return fmt.Errorf("app is closing")
 	}
 	a.Connected.Store(true)
 	a.setGoogleLastError("")
@@ -537,11 +627,19 @@ func (a *App) IsDeepBackfillRunning() bool {
 }
 
 // GetBackfillProgress returns a snapshot of the current backfill progress.
-func (a *App) GetBackfillProgress() BackfillProgress {
+func (a *App) GetBackfillProgress() BackfillProgressSnapshot {
 	return a.BackfillProgress.snapshot()
 }
 
 func (a *App) Close() {
+	a.closing.Store(true)
+	if !a.googleConnectMu.TryLock() {
+		// A blocked remote connect owns no durable writes that require explicit
+		// shutdown. Let process exit reclaim it instead of racing the store close
+		// or hanging indefinitely on a phone that is unavailable.
+		return
+	}
+	defer a.googleConnectMu.Unlock()
 	if cli := a.GetClient(); cli != nil {
 		cli.GM.Disconnect()
 	}

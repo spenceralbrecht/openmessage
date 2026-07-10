@@ -4,9 +4,96 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
+
+func TestNewTightensMessagingStorePermissions(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "openmessage-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(): %v", err)
+	}
+	for _, name := range []string{"messages.db", "whatsapp-session.db", "session.json"} {
+		if err := os.WriteFile(filepath.Join(dataDir, name), nil, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", name, err)
+		}
+	}
+	t.Setenv("OPENMESSAGES_DATA_DIR", dataDir)
+
+	a, err := New(zerolog.Nop())
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	defer a.Close()
+
+	if info, err := os.Stat(dataDir); err != nil {
+		t.Fatalf("Stat(data dir): %v", err)
+	} else if got := info.Mode().Perm(); got != 0o700 {
+		t.Fatalf("data dir mode = %04o, want 0700", got)
+	}
+	for _, name := range []string{"messages.db", "whatsapp-session.db", "session.json"} {
+		info, err := os.Stat(filepath.Join(dataDir, name))
+		if err != nil {
+			t.Fatalf("Stat(%s): %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Fatalf("%s mode = %04o, want 0600", name, got)
+		}
+	}
+}
+
+func TestNewRejectsSymlinkedMessagingStore(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "openmessage-data")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "unrelated")
+	if err := os.WriteFile(target, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dataDir, "messages.db")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENMESSAGES_DATA_DIR", dataDir)
+
+	if _, err := New(zerolog.Nop()); err == nil {
+		t.Fatal("New() succeeded with a symlinked messaging store")
+	}
+	if content, err := os.ReadFile(target); err != nil {
+		t.Fatal(err)
+	} else if string(content) != "preserve" {
+		t.Fatalf("symlink target changed to %q", content)
+	}
+}
+
+func TestLoadAndConnectRejectsClosingApp(t *testing.T) {
+	a := &App{}
+	a.closing.Store(true)
+	if err := a.LoadAndConnect(); err == nil || err.Error() != "app is closing" {
+		t.Fatalf("LoadAndConnect() error = %v, want app is closing", err)
+	}
+}
+
+func TestCloseDoesNotBlockOnInFlightGoogleConnect(t *testing.T) {
+	a := &App{}
+	a.googleConnectMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on in-flight Google connection")
+	}
+	a.googleConnectMu.Unlock()
+	if !a.closing.Load() {
+		t.Fatal("Close did not mark app as closing")
+	}
+}
 
 func TestNewDemoUsesIsolatedTempDataDir(t *testing.T) {
 	realDataDir := filepath.Join(t.TempDir(), "real-data")

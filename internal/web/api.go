@@ -45,6 +45,7 @@ type UnpairFunc func() error
 
 // APIOptions holds optional callbacks for the API handler.
 type APIOptions struct {
+	ReadOnly              bool
 	Client                func() *client.Client
 	Events                *EventBroker
 	EventHeartbeat        time.Duration
@@ -143,6 +144,7 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 	statusPayload := func(connected bool) map[string]any {
 		payload := map[string]any{
 			"connected": connected,
+			"read_only": opts.ReadOnly,
 		}
 		if strings.TrimSpace(opts.IdentityName) != "" {
 			payload["identity_name"] = strings.TrimSpace(opts.IdentityName)
@@ -192,35 +194,35 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 		payload["capabilities"] = map[string]any{
 			"google": map[string]bool{
 				"status":    opts.GoogleStatus != nil,
-				"reconnect": opts.ReconnectGoogle != nil,
-				"unpair":    opts.Unpair != nil,
+				"reconnect": !opts.ReadOnly && opts.ReconnectGoogle != nil,
+				"unpair":    !opts.ReadOnly && opts.Unpair != nil,
 			},
 			"whatsapp": map[string]bool{
 				"status":         opts.WhatsAppStatus != nil,
-				"connect":        opts.ConnectWhatsApp != nil,
-				"unpair":         opts.UnpairWhatsApp != nil,
+				"connect":        !opts.ReadOnly && opts.ConnectWhatsApp != nil,
+				"unpair":         !opts.ReadOnly && opts.UnpairWhatsApp != nil,
 				"qr":             opts.WhatsAppQRCode != nil,
 				"avatar":         opts.WhatsAppAvatar != nil,
-				"send_text":      opts.SendWhatsAppText != nil,
-				"send_media":     opts.SendWhatsAppMedia != nil,
-				"send_reaction":  opts.SendWhatsAppReaction != nil,
+				"send_text":      !opts.ReadOnly && opts.SendWhatsAppText != nil,
+				"send_media":     !opts.ReadOnly && opts.SendWhatsAppMedia != nil,
+				"send_reaction":  !opts.ReadOnly && opts.SendWhatsAppReaction != nil,
 				"download_media": opts.DownloadWhatsAppMedia != nil,
-				"leave_group":    opts.LeaveWhatsAppGroup != nil,
+				"leave_group":    !opts.ReadOnly && opts.LeaveWhatsAppGroup != nil,
 			},
 			"signal": map[string]bool{
 				"status":         opts.SignalStatus != nil,
-				"connect":        opts.ConnectSignal != nil,
-				"unpair":         opts.UnpairSignal != nil,
+				"connect":        !opts.ReadOnly && opts.ConnectSignal != nil,
+				"unpair":         !opts.ReadOnly && opts.UnpairSignal != nil,
 				"qr":             opts.SignalQRCode != nil,
-				"send_text":      opts.SendSignalText != nil,
-				"send_media":     opts.SendSignalMedia != nil,
-				"send_reaction":  opts.SendSignalReaction != nil,
+				"send_text":      !opts.ReadOnly && opts.SendSignalText != nil,
+				"send_media":     !opts.ReadOnly && opts.SendSignalMedia != nil,
+				"send_reaction":  !opts.ReadOnly && opts.SendSignalReaction != nil,
 				"download_media": opts.DownloadSignalMedia != nil,
 			},
 			"backfill": map[string]bool{
 				"status":   opts.BackfillStatus != nil,
-				"deep":     opts.StartDeepBackfill != nil,
-				"targeted": opts.BackfillPhone != nil,
+				"deep":     !opts.ReadOnly && opts.StartDeepBackfill != nil,
+				"targeted": !opts.ReadOnly && opts.BackfillPhone != nil,
 			},
 			"link_preview": map[string]bool{
 				"fetch": opts.FetchLinkPreview != nil,
@@ -1652,18 +1654,38 @@ func APIHandlerWithOptions(store *db.Store, cli *client.Client, logger zerolog.L
 	staticHandler := http.FileServer(http.FS(staticContent))
 	mux.Handle("/", staticHandler)
 
-	// Wrap the mux to intercept /mcp/ requests before the mux's catch-all
+	apiHandler := readOnlyAPIHandler(mux, opts.ReadOnly)
+
+	// Wrap the mux to intercept /mcp/ requests before the mux's catch-all.
+	// MCP uses POST for its transport, so the HTTP read-only guard must only
+	// cover browser API routes. MCP tool mutations have separate capability
+	// gates and are disabled by default by the command layer.
 	if mcpHandler != nil {
 		return SecureHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasPrefix(r.URL.Path, "/mcp/") {
 				mcpHandler.ServeHTTP(w, r)
 				return
 			}
-			mux.ServeHTTP(w, r)
+			apiHandler.ServeHTTP(w, r)
 		}), opts.AuthToken)
 	}
 
-	return SecureHandler(mux, opts.AuthToken)
+	return SecureHandler(apiHandler, opts.AuthToken)
+}
+
+func readOnlyAPIHandler(next http.Handler, readOnly bool) http.Handler {
+	if !readOnly {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		isAPI := r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/")
+		isReadMethod := r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions
+		if isAPI && !isReadMethod {
+			httpError(w, "web write capability is disabled", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func mergeSearchResults(store *db.Store, msgs []*db.Message, convos []*db.Conversation, limit int) []SearchResult {

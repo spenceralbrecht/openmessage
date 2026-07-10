@@ -80,6 +80,10 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		return fmt.Errorf("create auth token: %w", err)
 	}
 	isDemo := app.DemoMode()
+	readOnlyWeb := !envEnabled("OPENMESSAGES_ALLOW_WEB_WRITES")
+	whatsAppLiveEnabled := os.Getenv("OPENMESSAGES_WHATSAPP") != "0"
+	signalLiveEnabled := os.Getenv("OPENMESSAGES_SIGNAL") != "0"
+	iMessageImportEnabled := os.Getenv("OPENMESSAGES_IMESSAGE") != "0"
 
 	events := web.NewEventBroker()
 	isConnected := func() bool {
@@ -112,9 +116,13 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 
 	// Connect to Google Messages (skip in demo mode)
 	if !isDemo {
-		if err := a.LoadAndConnect(); err != nil {
-			logger.Warn().Err(err).Msg("Google Messages unavailable")
-		} else {
+		// Phone availability must not gate the loopback API or supervisor health.
+		// The connection owns its backfill and status updates in this goroutine.
+		go func() {
+			if err := a.LoadAndConnect(); err != nil {
+				logger.Warn().Err(err).Msg("Google Messages unavailable")
+				return
+			}
 			mode := startupBackfillMode()
 			runShallowBackfill := func() {
 				go func() {
@@ -145,28 +153,32 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 					runShallowBackfill()
 				}
 			}
-		}
+		}()
 	} else {
 		logger.Info().Msg("Demo mode — skipping phone connection")
 	}
 
-	if !isDemo {
+	if !isDemo && whatsAppLiveEnabled {
 		if err := a.LoadAndConnectWhatsApp(); err != nil {
 			logger.Warn().Err(err).Msg("WhatsApp live bridge unavailable")
 		}
+	} else if !isDemo {
+		logger.Info().Msg("WhatsApp live bridge disabled")
 	} else {
 		logger.Info().Msg("Demo mode — skipping WhatsApp live bridge")
 	}
 
-	if !isDemo {
+	if !isDemo && signalLiveEnabled {
 		if err := a.LoadAndConnectSignal(); err != nil {
 			logger.Warn().Err(err).Msg("Signal live bridge unavailable")
 		}
+	} else if !isDemo {
+		logger.Info().Msg("Signal live bridge disabled")
 	} else {
 		logger.Info().Msg("Demo mode — skipping Signal live bridge")
 	}
 
-	if !isDemo {
+	if !isDemo && whatsAppLiveEnabled {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -182,7 +194,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		}()
 	}
 
-	if !isDemo {
+	if !isDemo && signalLiveEnabled {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -206,7 +218,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		}()
 	}
 
-	// Sync WhatsApp and iMessage periodically (every 30s, incremental)
+	// Sync permitted local desktop message stores periodically (every 30s,
+	// incremental). The persistent service disables WhatsApp here because WACLI
+	// is its single authoritative WhatsApp ingestion path.
 	lastImportErr := map[string]string{}
 	syncLocalPlatforms := func() {
 		if app.Sandboxed() || isDemo {
@@ -231,22 +245,26 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 				Msg(successMsg)
 		}
 
-		if !a.UsesWhatsAppLiveBridge() {
+		if whatsAppLiveEnabled && !a.UsesWhatsAppLiveBridge() {
 			syncPlatform("whatsapp", "WhatsApp sync complete", func(store *db.Store) (*importer.ImportResult, error) {
 				return (&importer.WhatsAppNative{MyName: identityName}).ImportFromDB(store)
 			})
 		}
-		if signalStatus := a.SignalStatus(); signalStatus.Paired {
-			syncPlatform("signal", "Signal desktop sync complete", func(store *db.Store) (*importer.ImportResult, error) {
-				return (&importer.SignalDesktop{
-					MyName:    identityName,
-					MyAddress: signalStatus.Account,
-				}).ImportFromDB(store)
+		if signalLiveEnabled {
+			if signalStatus := a.SignalStatus(); signalStatus.Paired {
+				syncPlatform("signal", "Signal desktop sync complete", func(store *db.Store) (*importer.ImportResult, error) {
+					return (&importer.SignalDesktop{
+						MyName:    identityName,
+						MyAddress: signalStatus.Account,
+					}).ImportFromDB(store)
+				})
+			}
+		}
+		if iMessageImportEnabled {
+			syncPlatform("imessage", "iMessage sync complete", func(store *db.Store) (*importer.ImportResult, error) {
+				return (&importer.IMessage{MyName: identityName}).ImportFromDB(store)
 			})
 		}
-		syncPlatform("imessage", "iMessage sync complete", func(store *db.Store) (*importer.ImportResult, error) {
-			return (&importer.IMessage{MyName: identityName}).ImportFromDB(store)
-		})
 		if changed {
 			events.PublishConversations()
 			events.PublishMessages("")
@@ -285,6 +303,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	// recovery lag against the cost of a full scan (~1–2s on a typical
 	// archive of a few thousand rows).
 	safeFullSignalSync := func() {
+		if !signalLiveEnabled {
+			return
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error().
@@ -354,6 +375,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	}
 
 	httpHandler := web.APIHandlerWithOptions(a.Store, nil, logger, sseSrv, web.APIOptions{
+		ReadOnly:             readOnlyWeb,
 		Client:               a.GetClient,
 		Events:               events,
 		IdentityName:         identityName,
@@ -396,7 +418,11 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	}
 	go func() {
 		logger.Info().Str("addr", listenAddr).Msg("Web UI available at " + baseURL)
-		logger.Info().Str("url", baseURL+"/?"+web.AuthTokenQueryParam+"="+authToken).Msg("Authenticated Web UI URL")
+		if interactiveTerminal && term.IsTerminal(int(os.Stderr.Fd())) {
+			// Keep the per-launch capability out of background logs while preserving
+			// the manual `serve` workflow for a user at an attached terminal.
+			fmt.Fprintf(os.Stderr, "Authenticated Web UI: %s/?%s=%s\n", baseURL, web.AuthTokenQueryParam, authToken)
+		}
 		logger.Info().Str("addr", listenAddr).Msg("MCP SSE available at " + baseURL + "/mcp/sse")
 		srv := &http.Server{
 			Handler:           httpHandler,

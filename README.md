@@ -54,7 +54,7 @@ This starts both:
 - **Web UI** at [http://127.0.0.1:7007](http://127.0.0.1:7007)
 - **MCP SSE endpoint** at `http://127.0.0.1:7007/mcp/sse`
 
-The server now creates or reads an auth token on startup. Use the authenticated URL printed in the logs, or set `OPENMESSAGES_AUTH_TOKEN` yourself and pass it as `Authorization: Bearer <token>` or `X-OpenMessage-Token` for API/MCP clients.
+The server now creates or reads an auth token on startup. An attached interactive terminal prints the authenticated browser URL; background services deliberately do not log the generated token. For non-interactive API/MCP clients, set `OPENMESSAGES_AUTH_TOKEN` yourself and pass it as `Authorization: Bearer <token>` or `X-OpenMessage-Token`.
 
 When `serve` is launched by an MCP client over pipes, it also serves MCP on stdio automatically.
 
