@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,6 +44,8 @@ type linkPreviewCacheEntry struct {
 type LinkPreviewService struct {
 	logger            zerolog.Logger
 	client            *http.Client
+	resolver          *net.Resolver
+	dialer            *net.Dialer
 	ttl               time.Duration
 	maxEntries        int
 	allowPrivateHosts bool
@@ -52,21 +55,76 @@ type LinkPreviewService struct {
 }
 
 func NewLinkPreviewService(logger zerolog.Logger) *LinkPreviewService {
-	return &LinkPreviewService{
-		logger: logger,
-		client: &http.Client{
-			Timeout: 6 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return errors.New("too many redirects")
-				}
-				return nil
-			},
-		},
+	service := &LinkPreviewService{
+		logger:     logger,
+		resolver:   net.DefaultResolver,
+		dialer:     &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second},
 		ttl:        6 * time.Hour,
 		maxEntries: 256,
 		cache:      make(map[string]linkPreviewCacheEntry),
 	}
+	service.client = service.newHTTPClient()
+	return service
+}
+
+func (s *LinkPreviewService) newHTTPClient() *http.Client {
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           s.dialPreviewContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          16,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+	}
+	return &http.Client{
+		Timeout:   6 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			if _, _, err := normalizeLinkPreviewURL(req.URL.String()); err != nil {
+				return err
+			}
+			if !s.allowPrivateHosts {
+				if err := ensureSafePreviewPort(req.URL); err != nil {
+					return err
+				}
+				if err := ensurePublicPreviewHostWithResolver(req.Context(), req.URL, s.resolver); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func (s *LinkPreviewService) dialPreviewContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("parse preview address: %w", err)
+	}
+	if s.allowPrivateHosts {
+		return s.dialer.DialContext(ctx, network, address)
+	}
+
+	ips, err := publicPreviewIPs(ctx, host, s.resolver)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, ip := range ips {
+		conn, dialErr := s.dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = ErrBlockedLinkPreviewURL
+	}
+	return nil, fmt.Errorf("dial preview host: %w", lastErr)
 }
 
 func (s *LinkPreviewService) Fetch(ctx context.Context, rawURL string) (*LinkPreview, error) {
@@ -75,7 +133,10 @@ func (s *LinkPreviewService) Fetch(ctx context.Context, rawURL string) (*LinkPre
 		return nil, err
 	}
 	if !s.allowPrivateHosts {
-		if err := ensurePublicPreviewHost(ctx, parsedURL); err != nil {
+		if err := ensureSafePreviewPort(parsedURL); err != nil {
+			return nil, err
+		}
+		if err := ensurePublicPreviewHostWithResolver(ctx, parsedURL, s.resolver); err != nil {
 			return nil, err
 		}
 	}
@@ -98,7 +159,7 @@ func (s *LinkPreviewService) Fetch(ctx context.Context, rawURL string) (*LinkPre
 	defer resp.Body.Close()
 
 	if resp.Request != nil && resp.Request.URL != nil && !s.allowPrivateHosts {
-		if err := ensurePublicPreviewHost(ctx, resp.Request.URL); err != nil {
+		if err := ensurePublicPreviewHostWithResolver(ctx, resp.Request.URL, s.resolver); err != nil {
 			return nil, err
 		}
 	}
@@ -220,11 +281,26 @@ func normalizeLinkPreviewURL(raw string) (string, *url.URL, error) {
 	if parsed.Hostname() == "" {
 		return "", nil, ErrInvalidLinkPreviewURL
 	}
+	if parsed.User != nil {
+		return "", nil, ErrInvalidLinkPreviewURL
+	}
 	parsed.Fragment = ""
 	return parsed.String(), parsed, nil
 }
 
+func ensureSafePreviewPort(target *url.URL) error {
+	port := target.Port()
+	if port == "" || (target.Scheme == "http" && port == "80") || (target.Scheme == "https" && port == "443") {
+		return nil
+	}
+	return ErrBlockedLinkPreviewURL
+}
+
 func ensurePublicPreviewHost(ctx context.Context, target *url.URL) error {
+	return ensurePublicPreviewHostWithResolver(ctx, target, net.DefaultResolver)
+}
+
+func ensurePublicPreviewHostWithResolver(ctx context.Context, target *url.URL, resolver *net.Resolver) error {
 	host := strings.ToLower(target.Hostname())
 	if host == "" {
 		return ErrInvalidLinkPreviewURL
@@ -233,30 +309,43 @@ func ensurePublicPreviewHost(ctx context.Context, target *url.URL) error {
 		return ErrBlockedLinkPreviewURL
 	}
 
+	_, err := publicPreviewIPs(ctx, host, resolver)
+	return err
+}
+
+func publicPreviewIPs(ctx context.Context, host string, resolver *net.Resolver) ([]net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		if isPrivatePreviewIP(ip) {
-			return ErrBlockedLinkPreviewURL
+			return nil, ErrBlockedLinkPreviewURL
 		}
-		return nil
+		return []net.IP{ip}, nil
 	}
-
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	addrs, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil {
-		return fmt.Errorf("resolve preview host: %w", err)
+		return nil, fmt.Errorf("resolve preview host: %w", err)
 	}
+	ips := make([]net.IP, 0, len(addrs))
 	for _, addr := range addrs {
 		if isPrivatePreviewIP(addr.IP) {
-			return ErrBlockedLinkPreviewURL
+			return nil, ErrBlockedLinkPreviewURL
 		}
+		ips = append(ips, addr.IP)
 	}
-	return nil
+	if len(ips) == 0 {
+		return nil, ErrBlockedLinkPreviewURL
+	}
+	return ips, nil
 }
 
 func isPrivatePreviewIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	return ip.IsLoopback() ||
+	return !ip.IsGlobalUnicast() ||
+		ip.IsLoopback() ||
 		ip.IsPrivate() ||
 		ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
@@ -266,25 +355,27 @@ func isPrivatePreviewIP(ip net.IP) bool {
 }
 
 func extractLinkPreview(body []byte, baseURL *url.URL) (*LinkPreview, error) {
-	doc, err := html.Parse(strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("parse link preview: %w", err)
-	}
-
 	meta := map[string]string{}
 	title := ""
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode {
-			switch strings.ToLower(node.Data) {
+	inTitle := false
+	tokenizer := html.NewTokenizer(bytes.NewReader(body))
+	for {
+		switch tokenizer.Next() {
+		case html.ErrorToken:
+			if err := tokenizer.Err(); err != nil && err != io.EOF {
+				return nil, fmt.Errorf("parse link preview: %w", err)
+			}
+			goto parsed
+		case html.StartTagToken, html.SelfClosingTagToken:
+			token := tokenizer.Token()
+			switch strings.ToLower(token.Data) {
+			case "body":
+				goto parsed
 			case "title":
-				if title == "" {
-					title = collapsePreviewWhitespace(textContent(node))
-				}
+				inTitle = true
 			case "meta":
-				key := ""
-				content := ""
-				for _, attr := range node.Attr {
+				key, content := "", ""
+				for _, attr := range token.Attr {
 					switch strings.ToLower(attr.Key) {
 					case "property", "name", "itemprop":
 						if key == "" {
@@ -300,18 +391,26 @@ func extractLinkPreview(body []byte, baseURL *url.URL) (*LinkPreview, error) {
 					}
 				}
 			}
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
+		case html.EndTagToken:
+			if strings.EqualFold(tokenizer.Token().Data, "title") {
+				inTitle = false
+			}
+		case html.TextToken:
+			if inTitle && title == "" {
+				title = collapsePreviewWhitespace(string(tokenizer.Text()))
+			}
 		}
 	}
-	walk(doc)
+
+parsed:
 
 	preview := &LinkPreview{
 		Title:       firstNonEmpty(meta["og:title"], meta["twitter:title"], meta["title"], title),
 		Description: firstNonEmpty(meta["og:description"], meta["twitter:description"], meta["description"]),
-		ImageURL:    resolvePreviewURL(baseURL, firstNonEmpty(meta["og:image"], meta["twitter:image"], meta["twitter:image:src"], meta["image"])),
-		SiteName:    firstNonEmpty(meta["og:site_name"], meta["application-name"]),
+		// External preview images are intentionally omitted. Letting the browser
+		// fetch arbitrary metadata URLs would bypass the server's IP filtering.
+		ImageURL: "",
+		SiteName: firstNonEmpty(meta["og:site_name"], meta["application-name"]),
 	}
 
 	preview.Title = truncatePreviewText(preview.Title, 180)
@@ -367,24 +466,6 @@ func resolvePreviewURL(baseURL *url.URL, raw string) string {
 		return ""
 	}
 	return baseURL.ResolveReference(parsed).String()
-}
-
-func textContent(node *html.Node) string {
-	if node == nil {
-		return ""
-	}
-	var builder strings.Builder
-	var walk func(*html.Node)
-	walk = func(current *html.Node) {
-		if current.Type == html.TextNode {
-			builder.WriteString(current.Data)
-		}
-		for child := current.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-		}
-	}
-	walk(node)
-	return builder.String()
 }
 
 func prettifyPreviewHost(host string) string {

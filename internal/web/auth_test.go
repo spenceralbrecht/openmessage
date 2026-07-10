@@ -28,6 +28,10 @@ func TestSecureHandlerProtectsAPI(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 		}
+		csp := rec.Header().Get("Content-Security-Policy")
+		if csp == "" || csp != contentSecurityPolicy() {
+			t.Fatalf("Content-Security-Policy = %q, want hardened embedded policy", csp)
+		}
 	})
 
 	t.Run("blocks cross-origin post even with cookie", func(t *testing.T) {

@@ -45,9 +45,64 @@ func TestLinkPreviewServiceFetchParsesMetadata(t *testing.T) {
 	if preview.SiteName != "Preview Site" {
 		t.Fatalf("got site name %q", preview.SiteName)
 	}
-	if preview.ImageURL != srv.URL+"/card.png" {
-		t.Fatalf("got image URL %q", preview.ImageURL)
+	if preview.ImageURL != "" {
+		t.Fatalf("got image URL %q, want external preview images disabled", preview.ImageURL)
 	}
+}
+
+func TestNormalizeLinkPreviewURLRejectsCredentials(t *testing.T) {
+	if _, _, err := normalizeLinkPreviewURL("https://user:password@example.com/path"); !errors.Is(err, ErrInvalidLinkPreviewURL) {
+		t.Fatalf("normalize error = %v, want ErrInvalidLinkPreviewURL", err)
+	}
+}
+
+func TestSafePreviewPortRejectsNonWebPorts(t *testing.T) {
+	for _, rawURL := range []string{"http://example.com:8080/path", "https://example.com:8443/path"} {
+		_, parsed, err := normalizeLinkPreviewURL(rawURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ensureSafePreviewPort(parsed); !errors.Is(err, ErrBlockedLinkPreviewURL) {
+			t.Fatalf("port check for %q = %v, want ErrBlockedLinkPreviewURL", rawURL, err)
+		}
+	}
+}
+
+func TestLinkPreviewRedirectRevalidatesDestination(t *testing.T) {
+	privateReached := false
+	service := NewLinkPreviewService(zerolog.Nop())
+	redirectURL := "https://example.com/start"
+	service.client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Hostname() == "127.0.0.1" {
+				privateReached = true
+			}
+			if req.URL.String() == redirectURL {
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{"http://127.0.0.1/secret"}},
+					Body:       http.NoBody,
+					Request:    req,
+				}, nil
+			}
+			return http.DefaultTransport.RoundTrip(req)
+		}),
+		CheckRedirect: service.newHTTPClient().CheckRedirect,
+	}
+
+	_, err := service.Fetch(context.Background(), redirectURL)
+	if !errors.Is(err, ErrBlockedLinkPreviewURL) {
+		t.Fatalf("fetch error = %v, want ErrBlockedLinkPreviewURL", err)
+	}
+	if privateReached {
+		t.Fatal("private redirect destination received a request")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func TestLinkPreviewServiceBlocksPrivateHostsByDefault(t *testing.T) {

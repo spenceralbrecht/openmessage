@@ -80,6 +80,8 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		return fmt.Errorf("create auth token: %w", err)
 	}
 	isDemo := app.DemoMode()
+	readOnlyWeb := !envEnabled("OPENMESSAGES_ALLOW_WEB_WRITES")
+	whatsAppLiveEnabled := os.Getenv("OPENMESSAGES_WHATSAPP") != "0"
 
 	events := web.NewEventBroker()
 	isConnected := func() bool {
@@ -150,10 +152,12 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		logger.Info().Msg("Demo mode — skipping phone connection")
 	}
 
-	if !isDemo {
+	if !isDemo && whatsAppLiveEnabled {
 		if err := a.LoadAndConnectWhatsApp(); err != nil {
 			logger.Warn().Err(err).Msg("WhatsApp live bridge unavailable")
 		}
+	} else if !isDemo {
+		logger.Info().Msg("WhatsApp live bridge disabled")
 	} else {
 		logger.Info().Msg("Demo mode — skipping WhatsApp live bridge")
 	}
@@ -166,7 +170,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		logger.Info().Msg("Demo mode — skipping Signal live bridge")
 	}
 
-	if !isDemo {
+	if !isDemo && whatsAppLiveEnabled {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -206,7 +210,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		}()
 	}
 
-	// Sync WhatsApp and iMessage periodically (every 30s, incremental)
+	// Sync permitted local desktop message stores periodically (every 30s,
+	// incremental). The persistent service disables WhatsApp here because WACLI
+	// is its single authoritative WhatsApp ingestion path.
 	lastImportErr := map[string]string{}
 	syncLocalPlatforms := func() {
 		if app.Sandboxed() || isDemo {
@@ -231,7 +237,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 				Msg(successMsg)
 		}
 
-		if !a.UsesWhatsAppLiveBridge() {
+		if whatsAppLiveEnabled && !a.UsesWhatsAppLiveBridge() {
 			syncPlatform("whatsapp", "WhatsApp sync complete", func(store *db.Store) (*importer.ImportResult, error) {
 				return (&importer.WhatsAppNative{MyName: identityName}).ImportFromDB(store)
 			})
@@ -354,6 +360,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	}
 
 	httpHandler := web.APIHandlerWithOptions(a.Store, nil, logger, sseSrv, web.APIOptions{
+		ReadOnly:             readOnlyWeb,
 		Client:               a.GetClient,
 		Events:               events,
 		IdentityName:         identityName,
@@ -396,7 +403,11 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	}
 	go func() {
 		logger.Info().Str("addr", listenAddr).Msg("Web UI available at " + baseURL)
-		logger.Info().Str("url", baseURL+"/?"+web.AuthTokenQueryParam+"="+authToken).Msg("Authenticated Web UI URL")
+		if interactiveTerminal && term.IsTerminal(int(os.Stderr.Fd())) {
+			// Keep the per-launch capability out of background logs while preserving
+			// the manual `serve` workflow for a user at an attached terminal.
+			fmt.Fprintf(os.Stderr, "Authenticated Web UI: %s/?%s=%s\n", baseURL, web.AuthTokenQueryParam, authToken)
+		}
 		logger.Info().Str("addr", listenAddr).Msg("MCP SSE available at " + baseURL + "/mcp/sse")
 		srv := &http.Server{
 			Handler:           httpHandler,

