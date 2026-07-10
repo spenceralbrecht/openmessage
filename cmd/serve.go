@@ -82,6 +82,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	isDemo := app.DemoMode()
 	readOnlyWeb := !envEnabled("OPENMESSAGES_ALLOW_WEB_WRITES")
 	whatsAppLiveEnabled := os.Getenv("OPENMESSAGES_WHATSAPP") != "0"
+	signalLiveEnabled := os.Getenv("OPENMESSAGES_SIGNAL") != "0"
 
 	events := web.NewEventBroker()
 	isConnected := func() bool {
@@ -114,9 +115,13 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 
 	// Connect to Google Messages (skip in demo mode)
 	if !isDemo {
-		if err := a.LoadAndConnect(); err != nil {
-			logger.Warn().Err(err).Msg("Google Messages unavailable")
-		} else {
+		// Phone availability must not gate the loopback API or supervisor health.
+		// The connection owns its backfill and status updates in this goroutine.
+		go func() {
+			if err := a.LoadAndConnect(); err != nil {
+				logger.Warn().Err(err).Msg("Google Messages unavailable")
+				return
+			}
 			mode := startupBackfillMode()
 			runShallowBackfill := func() {
 				go func() {
@@ -147,7 +152,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 					runShallowBackfill()
 				}
 			}
-		}
+		}()
 	} else {
 		logger.Info().Msg("Demo mode — skipping phone connection")
 	}
@@ -162,10 +167,12 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		logger.Info().Msg("Demo mode — skipping WhatsApp live bridge")
 	}
 
-	if !isDemo {
+	if !isDemo && signalLiveEnabled {
 		if err := a.LoadAndConnectSignal(); err != nil {
 			logger.Warn().Err(err).Msg("Signal live bridge unavailable")
 		}
+	} else if !isDemo {
+		logger.Info().Msg("Signal live bridge disabled")
 	} else {
 		logger.Info().Msg("Demo mode — skipping Signal live bridge")
 	}
@@ -186,7 +193,7 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 		}()
 	}
 
-	if !isDemo {
+	if !isDemo && signalLiveEnabled {
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
 			defer ticker.Stop()
@@ -242,13 +249,15 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 				return (&importer.WhatsAppNative{MyName: identityName}).ImportFromDB(store)
 			})
 		}
-		if signalStatus := a.SignalStatus(); signalStatus.Paired {
-			syncPlatform("signal", "Signal desktop sync complete", func(store *db.Store) (*importer.ImportResult, error) {
-				return (&importer.SignalDesktop{
-					MyName:    identityName,
-					MyAddress: signalStatus.Account,
-				}).ImportFromDB(store)
-			})
+		if signalLiveEnabled {
+			if signalStatus := a.SignalStatus(); signalStatus.Paired {
+				syncPlatform("signal", "Signal desktop sync complete", func(store *db.Store) (*importer.ImportResult, error) {
+					return (&importer.SignalDesktop{
+						MyName:    identityName,
+						MyAddress: signalStatus.Account,
+					}).ImportFromDB(store)
+				})
+			}
 		}
 		syncPlatform("imessage", "iMessage sync complete", func(store *db.Store) (*importer.ImportResult, error) {
 			return (&importer.IMessage{MyName: identityName}).ImportFromDB(store)
@@ -291,6 +300,9 @@ func RunServe(logger zerolog.Logger, args ...string) error {
 	// recovery lag against the cost of a full scan (~1–2s on a typical
 	// archive of a few thousand rows).
 	safeFullSignalSync := func() {
+		if !signalLiveEnabled {
+			return
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				logger.Error().

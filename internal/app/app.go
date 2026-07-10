@@ -128,6 +128,7 @@ func (p *BackfillProgress) snapshot() BackfillProgressSnapshot {
 
 type App struct {
 	clientMu               sync.RWMutex
+	googleConnectMu        sync.Mutex
 	Client                 *client.Client
 	Store                  *db.Store
 	EventHandler           *client.EventHandler
@@ -137,6 +138,7 @@ type App struct {
 	WhatsAppSessionPath    string
 	SignalConfigPath       string
 	Connected              atomic.Bool
+	closing                atomic.Bool
 	OnConversationsChange  func()
 	OnIncomingMessage      func(*db.Message)
 	OnMessagesChange       func(string)
@@ -376,6 +378,12 @@ func (a *App) setClient(cli *client.Client) {
 }
 
 func (a *App) LoadAndConnect() error {
+	a.googleConnectMu.Lock()
+	defer a.googleConnectMu.Unlock()
+	if a.closing.Load() {
+		return fmt.Errorf("app is closing")
+	}
+
 	sessionData, err := client.LoadSession(a.SessionPath)
 	if err != nil {
 		a.setGoogleLastError(err.Error())
@@ -424,6 +432,10 @@ func (a *App) LoadAndConnect() error {
 	if err := cli.GM.Connect(); err != nil {
 		a.setGoogleLastError(err.Error())
 		return fmt.Errorf("connect: %w", err)
+	}
+	if a.closing.Load() {
+		cli.GM.Disconnect()
+		return fmt.Errorf("app is closing")
 	}
 	a.Connected.Store(true)
 	a.setGoogleLastError("")
@@ -620,6 +632,14 @@ func (a *App) GetBackfillProgress() BackfillProgressSnapshot {
 }
 
 func (a *App) Close() {
+	a.closing.Store(true)
+	if !a.googleConnectMu.TryLock() {
+		// A blocked remote connect owns no durable writes that require explicit
+		// shutdown. Let process exit reclaim it instead of racing the store close
+		// or hanging indefinitely on a phone that is unavailable.
+		return
+	}
+	defer a.googleConnectMu.Unlock()
 	if cli := a.GetClient(); cli != nil {
 		cli.GM.Disconnect()
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -64,6 +65,33 @@ func TestNewRejectsSymlinkedMessagingStore(t *testing.T) {
 		t.Fatal(err)
 	} else if string(content) != "preserve" {
 		t.Fatalf("symlink target changed to %q", content)
+	}
+}
+
+func TestLoadAndConnectRejectsClosingApp(t *testing.T) {
+	a := &App{}
+	a.closing.Store(true)
+	if err := a.LoadAndConnect(); err == nil || err.Error() != "app is closing" {
+		t.Fatalf("LoadAndConnect() error = %v, want app is closing", err)
+	}
+}
+
+func TestCloseDoesNotBlockOnInFlightGoogleConnect(t *testing.T) {
+	a := &App{}
+	a.googleConnectMu.Lock()
+	done := make(chan struct{})
+	go func() {
+		a.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on in-flight Google connection")
+	}
+	a.googleConnectMu.Unlock()
+	if !a.closing.Load() {
+		t.Fatal("Close did not mark app as closing")
 	}
 }
 
